@@ -14,10 +14,6 @@ def _cors_json_response(data, status=200):
 
 @csrf_exempt
 def contact_api(request):
-    # Respond to preflight CORS requests
-    if request.method == "OPTIONS":
-        return _cors_json_response({}, status=200)
-
     if request.method == "POST":
         try:
             data = json.loads(request.body)
@@ -30,8 +26,8 @@ def contact_api(request):
             if not name or not email or not message:
                 return _cors_json_response({"message": "All fields are required"}, status=400)
 
-            # Optionally persist the message to DB here
-            # ContactMessage.objects.create(name=name, email=email, message=message, timestamp=timestamp)
+            # Persist the message to DB
+            ContactMessage.objects.create(name=name, email=email, message=message, timestamp=timestamp)
 
             return _cors_json_response({"message": "Message sent successfully"}, status=201)
 
