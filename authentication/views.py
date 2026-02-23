@@ -99,3 +99,10 @@ class SignupView(APIView):
             },
             status=status.HTTP_400_BAD_REQUEST,
         )
+
+
+class VerifyAuth(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        return Response({"success": True, "message": "User Authenticated"}, 200)
