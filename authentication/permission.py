@@ -1,7 +1,10 @@
 from rest_framework.permissions import BasePermission
 
+
 class HasPermission(BasePermission):
+
     def has_permission(self, request, view):
+
         if not request.user.is_authenticated:
             return False
 
@@ -10,7 +13,5 @@ class HasPermission(BasePermission):
         if not required_permission:
             return True
 
-        return request.user.role.permissions.filter(
-            permission_id=required_permission
-        ).exists()
+        return request.user.has_permission(required_permission)
 
