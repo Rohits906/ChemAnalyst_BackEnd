@@ -32,7 +32,7 @@ class User(AbstractUser):
     def __str__(self):
         return self.username
 
-    # 🔥 Permission check helper
+   
     def has_permission(self, permission_code):
         for role in self.roles.all():
             if role.permissions.filter(permission_id=permission_code).exists():

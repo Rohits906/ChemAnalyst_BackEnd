@@ -5,6 +5,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework_simplejwt.views import TokenObtainPairView
 from django.contrib.auth import get_user_model
 from .serializers import SignupSerializer
+from rest_framework.permissions import AllowAny
 from rest_framework import status
 from rest_framework_simplejwt.tokens import RefreshToken
 
@@ -60,6 +61,7 @@ class LogoutView(APIView):
 
 
 class SignupView(APIView):
+    permission_classes = [AllowAny]   
     serializer_class = SignupSerializer
 
     def post(self, request):
