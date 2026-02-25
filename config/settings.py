@@ -35,6 +35,7 @@ INSTALLED_APPS = [
     "authentication",
     "contact",
     "platforms",
+    "sentiment",
     "corsheaders",
 ]
 AUTH_USER_MODEL = "authentication.User"
