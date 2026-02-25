@@ -1,5 +1,33 @@
 from django.db import models
-from django.contrib.auth.models import AbstractUser
+from django.contrib.auth.models import User
+import uuid
+
+
+ACCOUNT_TYPE_CHOICES = [
+    ("individual", "Individual"),
+    ("business", "Business"),
+]
+
+
+class Account(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    name = models.CharField(max_length=120)
+
+    account_type = models.CharField(
+        max_length=20, choices=ACCOUNT_TYPE_CHOICES, default="individual"
+    )
+
+    account_owner = models.OneToOneField(
+        User, on_delete=models.CASCADE, related_name="owned_account"
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    is_active = models.BooleanField(default=True)
+
+    def __str__(self):
+        return self.name
 
 
 class Permission(models.Model):
@@ -10,27 +38,46 @@ class Permission(models.Model):
         return self.permission_id
 
 
+from django.core.exceptions import ValidationError
+
+
 class Role(models.Model):
-    role_name = models.CharField(max_length=50, unique=True)
-    permissions = models.ManyToManyField(
-        Permission,
-        related_name="roles",
-        blank=True
+    account = models.ForeignKey(
+        Account, on_delete=models.CASCADE, related_name="roles", null=True, blank=True
     )
 
+    role_name = models.CharField(max_length=50)
+
+    permissions = models.ManyToManyField(Permission, related_name="roles", blank=True)
+
+    is_system_role = models.BooleanField(default=False)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["account", "role_name"], name="unique_role_per_account"
+            )
+        ]
+
+    def clean(self):
+
+        if not self.is_system_role and not self.account:
+            raise ValidationError("Account is required for non-system roles.")
+
+        if self.is_system_role and self.account:
+            raise ValidationError("System roles cannot belong to an account.")
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        super().save(*args, **kwargs)
+
     def __str__(self):
-        return self.role_name
-
-
-class User(AbstractUser):
-    roles = models.ManyToManyField(
-        Role,
-        related_name="users",
-        blank=True
-    )
-
-    def __str__(self):
-        return self.username
+        if self.account:
+            return f"{self.role_name} ({self.account.name})"
+        return f"{self.role_name} (System)"
 
    
     def has_permission(self, permission_code):
@@ -41,4 +88,23 @@ class User(AbstractUser):
     
 
 
+class AccountMember(models.Model):
+    account = models.ForeignKey(
+        Account, on_delete=models.CASCADE, related_name="members"
+    )
 
+    user = models.ForeignKey(
+        User, on_delete=models.CASCADE, related_name="account_memberships"
+    )
+
+    role = models.ForeignKey(
+        Role, on_delete=models.CASCADE, related_name="assigned_members"
+    )
+
+    joined_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ("account", "user")
+
+    def __str__(self):
+        return f"{self.user.username} in {self.account.name}"
