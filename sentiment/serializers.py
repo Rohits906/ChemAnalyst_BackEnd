@@ -11,9 +11,9 @@ class UserKeywordSerializer(serializers.ModelSerializer):
 
 class UserSentimentSerializer(serializers.ModelSerializer):
     # Flatten Post fields into the response
-    post_title = serializers.CharField(source='post.post_text', default='N/A')
-    post_url = serializers.URLField(source='post.post_url', default='')
-    author = serializers.CharField(source='post.author_name', default='N/A')
+    post_title = serializers.CharField(source="post.post_title", read_only=True)
+    post_url = serializers.URLField(source="post.post_url", read_only=True)
+    author = serializers.CharField(source="post.author_name", read_only=True)
     author_id = serializers.CharField(source='post.author_id', default='N/A')
     platform = serializers.CharField(source='post.platform', default='')
     post_text = serializers.CharField(source='post.post_text', default='')

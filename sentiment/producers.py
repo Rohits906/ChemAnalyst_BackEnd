@@ -12,13 +12,11 @@ except Exception as e:
     sentiment_producer = None
 
 def add_to_sentiment_quene(data, keyword="N/A"):
-    """Sends each post from the search results to the Kafka topic for analysis."""
     if not sentiment_producer:
         print("Kafka producer is not initialized.")
         return
     
     for post in data:
-        # Include the keyword for each post
         post["keyword"] = keyword
         print(f"Sending post to Kafka: {post.get('post_id')}")
         sentiment_producer.send(settings.KAFKA_SENTIMENT_TOPIC, post)

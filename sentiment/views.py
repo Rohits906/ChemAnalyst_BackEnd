@@ -11,93 +11,103 @@ from .serializers import UserKeywordSerializer, UserSentimentSerializer
 from .producers import add_to_sentiment_quene
 
 
-@require_GET
-def sentiment_dashboard(request):
-    keyword = request.GET.get("keyword")
-    platform = request.GET.get("platform")
+class SentimentDashboardView(APIView):
+    permission_classes = [IsAuthenticated]
 
-    posts = SentimentPost.objects.select_related("platform").all()
+    def get(self, request):
+        keyword = request.query_params.get("keyword")
+        platform = request.query_params.get("platform")
 
-    # Apply Filters
-    if keyword:
-        posts = posts.filter(content__icontains=keyword)
+        # Get current user's keywords
+        user_keywords = User_Keyword.objects.filter(user=request.user).values_list("keyword", flat=True)
 
-    if platform:
-        posts = posts.filter(platform__name__iexact=platform)
+        if not user_keywords:
+            return Response({
+                "bar": [],
+                "donut": [],
+                "cards": [],
+                "recentPosts": [],
+                "message": "No keywords found for this user."
+            })
 
-    # BAR CHART DATA
-    bar_queryset = (
-        posts.values("platform__name")
-        .annotate(
-            positive=Count("id", filter=Q(sentiment="positive")),
-            negative=Count("id", filter=Q(sentiment="negative")),
+        # Base queryset for sentiments
+        sentiments = Sentiment.objects.filter(keyword__in=user_keywords).select_related("post")
+
+        # Apply Filters
+        if keyword:
+            sentiments = sentiments.filter(keyword__iexact=keyword)
+        
+        if platform:
+            sentiments = sentiments.filter(post__platform__iexact=platform)
+
+        # BAR CHART DATA (Platform-wise)
+        # We need to count positive/negative per platform
+        bar_queryset = (
+            sentiments.values("post__platform")
+            .annotate(
+                positive=Count("id", filter=Q(sentiment_label__iexact="positive")),
+                negative=Count("id", filter=Q(sentiment_label__iexact="negative")),
+            )
+            .order_by("post__platform")
         )
-        .order_by("platform__name")
-    )
 
-    bar_data = []
-    for item in bar_queryset:
-        bar_data.append(
+        bar_data = []
+        for item in bar_queryset:
+            bar_data.append(
+                {
+                    "name": item["post__platform"].title(),
+                    "pos": item["positive"], # Changed to match frontend expectation
+                    "neg": item["negative"], # Changed to match frontend expectation
+                }
+            )
+
+        # DONUT DATA (Overall)
+        positive_count = sentiments.filter(sentiment_label__iexact="positive").count()
+        negative_count = sentiments.filter(sentiment_label__iexact="negative").count()
+
+        donut_data = [
             {
-                "name": item["platform__name"].title(),
-                "positive": item["positive"],
-                "negative": item["negative"],
-            }
-        )
-
-    # DONUT DATA
-    positive_count = posts.filter(sentiment="positive").count()
-    negative_count = posts.filter(sentiment="negative").count()
-
-    donut_data = [
-        {
-            "name": "Positive",
-            "value": positive_count,
-            "color": "#8c84c4",
-        },
-        {
-            "name": "Negative",
-            "value": negative_count,
-            "color": "#1e1b4b",
-        },
-    ]
-
-    # CARDS DATA
-    cards_data = []
-    for item in bar_data:
-        cards_data.append(
+                "name": "Positive",
+                "value": positive_count,
+                "color": "#1E1B4B", # Deep Navy per Figma
+            },
             {
-                "name": item["name"],
-                "count": item["positive"] + item["negative"],
-                "icon": item["name"],
-            }
-        )
+                "name": "Negative",
+                "value": negative_count,
+                "color": "#8C84C4", # Lavender per Figma
+            },
+        ]
 
-    # RECENT POSTS
-    recent_posts_queryset = posts.order_by("-created_at")[:5]
+        # CARDS DATA
+        cards_data = []
+        for item in bar_data:
+            cards_data.append(
+                {
+                    "name": item["name"],
+                    "count": item["pos"] + item["neg"],
+                    "icon": item["name"],
+                }
+            )
 
-    recent_posts = []
-    for post in recent_posts_queryset:
-        recent_posts.append(
-            {
-                "id": post.id,
-                "platform": post.platform.name.title(),
-                "content": post.content,
-                "sentiment": post.sentiment,
-                "keyword": post.keyword,
-                "created_at": post.created_at.strftime("%Y-%m-%d %H:%M:%S"),
-            }
-        )
+        # RECENT POSTS
+        recent_sentiments = sentiments.order_by("-analyzed_at")[:5]
+        recent_posts = []
+        for s in recent_sentiments:
+            recent_posts.append({
+                "id": s.id,
+                "platform": s.post.platform.title(),
+                "content": s.post.post_text,
+                "sentiment": s.sentiment_label,
+                "keyword": s.keyword,
+                "created_at": s.analyzed_at.strftime("%Y-%m-%d %H:%M:%S"),
+            })
 
-    # FINAL RESPONSE
-    return JsonResponse(
-        {
+        return Response({
             "bar": bar_data,
             "donut": donut_data,
             "cards": cards_data,
             "recentPosts": recent_posts,
-        }
-    )
+        })
 
 
 class SocialMediaSearchView(APIView):
@@ -188,24 +198,36 @@ class SocialMediaSearchView(APIView):
             return []
         url = "https://api.twitter.com/2/tweets/search/recent"
         headers = {"Authorization": f"Bearer {settings.TWITTER_BEARER_TOKEN}"}
+        # Added expansions and user.fields to get username
         params = {
             "query": keyword,
-            "tweet.fields": "created_at,text",
+            "tweet.fields": "created_at,text,author_id",
+            "expansions": "author_id",
+            "user.fields": "username,name",
             "max_results": 15,
         }
         try:
             response = requests.get(url, headers=headers, params=params)
             data = response.json()
-            print(data)
             results = []
+            
+            # Create a map for user data
+            users_map = {}
+            if "includes" in data and "users" in data["includes"]:
+                for user in data["includes"]["users"]:
+                    users_map[user["id"]] = user["username"]
+
             if "data" in data:
                 for item in data["data"]:
+                    author_id = item.get("author_id")
+                    username = users_map.get(author_id, "unknown")
                     results.append(
                         {
                             "id": item["id"],
                             "text": item["text"],
                             "created_at": item.get("created_at"),
-                            "permalink": f"https://twitter.com/anyuser/status/{item['id']}",
+                            "author": username,
+                            "permalink": f"https://twitter.com/{username}/status/{item['id']}",
                         }
                     )
             return results
@@ -218,15 +240,16 @@ class SocialMediaSearchView(APIView):
         current_idd = 1
         twitter_raw = self._fetch_twitter(keyword)
         for post in twitter_raw:
+            text = post.get("text", "")
             all_posts.append(
                 {
                     "id": current_idd,
                     "post_id": post.get("id"),
-                    "post_title": "N/A",
-                    "post_text": post.get("text"),
+                    "post_title": text[:50] + "..." if len(text) > 50 else text,
+                    "post_text": text,
                     "post_url": post.get("permalink"),
                     "platform": "twitter",
-                    "author": "N/A",
+                    "author": post.get("author", ""),
                     "published_at": post.get("created_at"),
                     "extra_details": {},
                 }
@@ -235,15 +258,16 @@ class SocialMediaSearchView(APIView):
 
         instagram_raw = self._fetch_instagram(keyword)
         for post in instagram_raw:
+            caption = post.get("caption", "")
             all_posts.append(
                 {
                     "id": current_idd,
                     "post_id": post.get("id"),
-                    "post_title": post.get("caption", "")[:50].replace("\n", " "),
-                    "post_text": post.get("caption", ""),
+                    "post_title": caption[:50].replace("\n", " ") if caption else "Instagram Post",
+                    "post_text": caption,
                     "post_url": post.get("permalink"),
                     "platform": "instagram",
-                    "author": "N/A",
+                    "author": post.get("username", ""), 
                     "published_at": post.get("timestamp"),
                     "extra_details": {
                         "media_type": post.get("media_type"),
@@ -357,19 +381,21 @@ class AddKeywordView(APIView):
             "data": created_keywords
         }, status=201)
 
+    def delete(self, request):
+        """Delete a keyword by ID."""
+        keyword_id = request.query_params.get("id")
+        if not keyword_id:
+            return Response({"error": "Keyword ID is required."}, status=400)
+        
+        try:
+            keyword = User_Keyword.objects.get(id=keyword_id, user=request.user)
+            keyword.delete()
+            return Response({"success": True, "message": "Keyword deleted."})
+        except User_Keyword.DoesNotExist:
+            return Response({"error": "Keyword not found."}, status=404)
+
 
 class UserSentimentView(APIView):
-    """
-    Returns sentiment analysis results that belong to the
-    authenticated user's keywords.
-
-    Query params (all optional):
-        - keyword   : filter by a specific keyword
-        - sentiment : filter by sentiment_label (e.g. positive, negative)
-        - platform  : filter by post platform (e.g. youtube, twitter)
-        - page      : page number (default 1)
-        - page_size : results per page (default 20, max 100)
-    """
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
@@ -388,8 +414,7 @@ class UserSentimentView(APIView):
                 "results": [],
                 "message": "No keywords found for this user. Please add keywords first.",
             })
-
-        # 2. Query sentiments whose keyword is in the user's keyword list
+            
         sentiments = (
             Sentiment.objects
             .filter(keyword__in=user_keywords)
@@ -397,7 +422,6 @@ class UserSentimentView(APIView):
             .order_by("-analyzed_at")
         )
 
-        # 3. Optional filters
         keyword_filter = request.query_params.get("keyword")
         if keyword_filter:
             sentiments = sentiments.filter(keyword__iexact=keyword_filter)
@@ -410,7 +434,6 @@ class UserSentimentView(APIView):
         if platform_filter:
             sentiments = sentiments.filter(post__platform__iexact=platform_filter)
 
-        # 4. Pagination
         try:
             page = max(int(request.query_params.get("page", 1)), 1)
         except (ValueError, TypeError):

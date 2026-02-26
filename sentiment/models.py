@@ -54,6 +54,7 @@ class Post(models.Model):
     platform_post_id = models.CharField(max_length=255)
     author_name = models.CharField(max_length=255, default="N/A")
     author_id = models.CharField(max_length=255, default="N/A")
+    post_title = models.CharField(max_length=255, default="")
     post_text = models.TextField()
     post_url = models.URLField(max_length=500, default="https://example.com")
     published_at = models.DateTimeField()

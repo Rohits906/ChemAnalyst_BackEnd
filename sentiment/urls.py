@@ -1,6 +1,6 @@
 from django.urls import path
 from .views import (
-    sentiment_dashboard, 
+    SentimentDashboardView, 
     SocialMediaSearchView, 
     AddKeywordView, 
     UserSentimentView,
@@ -8,7 +8,7 @@ from .views import (
 )
 
 urlpatterns = [
-    path("dashboard/", sentiment_dashboard),
+    path("dashboard/", SentimentDashboardView.as_view()),
     path("search/", SocialMediaSearchView.as_view()),
     path("keywords/", AddKeywordView.as_view()),
     path("my-sentiments/", UserSentimentView.as_view()),

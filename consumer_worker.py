@@ -53,10 +53,12 @@ for msg in sentiment_consumer:
     try:
         platform_post_id = data.get("post_id") or f"unknown_{uuid.uuid4()}"
         platform = data.get("platform") or "unknown"
-        post_text = data.get("post_text") or "N/A"
-        author_name = data.get("author") or "N/A"
+        post_text = data.get("post_text") or ""
+        post_title = data.get("post_title") or (post_text[:100] if post_text else "")
+        author_name = data.get("author") or ""
         post_url = data.get("post_url") or "https://example.com"
         published_at_str = data.get("published_at")
+        
         if published_at_str:
             try:
                 published_at = parser.isoparse(published_at_str)
@@ -70,12 +72,17 @@ for msg in sentiment_consumer:
             platform_post_id=platform_post_id,
             defaults={
                 "author_name": author_name,
+                "post_title": post_title,
                 "post_text": post_text,
                 "post_url": post_url,
                 "published_at": published_at,
                 "raw_json": data.get("extra_details") or {}
             }
         )
+
+        if not created and (not post_obj.post_title or post_obj.post_title == "N/A"):
+            post_obj.post_title = post_title
+            post_obj.save()
 
         analysis = analyze_sentiment(post_text)
 
