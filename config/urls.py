@@ -23,5 +23,6 @@ urlpatterns = [
     path("api/", include("contact.urls")),
     path("api/platform/", include("platforms.urls")),
     path("api/sentiment/", include("sentiment.urls")),
+    path("api/reports/", include("reports.urls")),
     path("api/auth/",include("authentication.urls")),
 ]
