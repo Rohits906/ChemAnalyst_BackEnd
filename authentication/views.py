@@ -19,11 +19,26 @@ class LoginView(TokenObtainPairView):
         if response.status_code == 200:
             access_token = response.data.get("access")
             refresh_token = response.data.get("refresh")
+
+            # Look up the user to include profile data
+            username = request.data.get("username", "")
+            try:
+                user = User.objects.get(username=username)
+                user_data = {
+                    "email": user.email,
+                    "first_name": user.first_name,
+                    "last_name": user.last_name,
+                    "username": user.username,
+                }
+            except User.DoesNotExist:
+                user_data = {}
+
             response.data = {
                 "success": True,
                 "data": {
                     "access": access_token,
                     "refresh": refresh_token,
+                    "user": user_data,
                 },
             }
 
@@ -68,23 +83,40 @@ class SignupView(APIView):
         serializer = self.serializer_class(data=request.data)
         if serializer.is_valid():
             user = serializer.save()
-            access_token = RefreshToken.for_user(user).access_token
-            refresh_token = RefreshToken.for_user(user)
+            refresh = RefreshToken.for_user(user)
+            access_token = str(refresh.access_token)
+            refresh_token = str(refresh)
+
+            user_data = {
+                "email": user.email,
+                "first_name": user.first_name,
+                "last_name": user.last_name,
+                "username": user.username,
+            }
+
             response = Response(
-                {"success": True, "message": "User registered successfully"},
+                {
+                    "success": True,
+                    "message": "User registered successfully",
+                    "data": {
+                        "access": access_token,
+                        "refresh": refresh_token,
+                        "user": user_data,
+                    },
+                },
                 status=status.HTTP_201_CREATED,
             )
 
             response.set_cookie(
                 key="access_token",
-                value=str(access_token),
+                value=access_token,
                 httponly=True,
                 secure=True,
                 samesite="Lax",
             )
             response.set_cookie(
                 key="refresh_token",
-                value=str(refresh_token),
+                value=refresh_token,
                 httponly=True,
                 secure=True,
                 samesite="Lax",
@@ -105,4 +137,13 @@ class VerifyAuth(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        return Response({"success": True, "message": "User Authenticated"}, 200)
+        user = request.user
+        user_data = {
+            "email": user.email,
+            "first_name": user.first_name,
+            "last_name": user.last_name,
+            "username": user.username,
+        }
+        return Response(
+            {"success": True, "message": "User Authenticated", "data": user_data}, 200
+        )
