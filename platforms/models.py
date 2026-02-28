@@ -1,6 +1,10 @@
 from django.db import models
+from django.contrib.auth import get_user_model
+
+User = get_user_model()
 
 class AddPlatform(models.Model):
+    user = models.ForeignKey(User, on_delete=models.CASCADE, null=True, blank=True)
     PLATFORM_CHOICES = [
         ("youtube", "YouTube"),
         ("instagram", "Instagram"),

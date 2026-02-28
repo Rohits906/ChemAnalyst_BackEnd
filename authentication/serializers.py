@@ -1,5 +1,6 @@
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
+from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 
 User = get_user_model()
 
@@ -39,3 +40,27 @@ class SignupSerializer(serializers.Serializer):
                 "Password must be at least 8 characters long."
             )
         return value
+class SecurityQuestionSerializer(serializers.ModelSerializer):
+    class Meta:
+        from .models import SecurityQuestion
+        model = SecurityQuestion
+        fields = "__all__"
+
+
+class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
+    def validate(self, attrs):
+        # The frontend sends email in the username field
+        username = attrs.get('username')
+        password = attrs.get('password')
+
+        if username and '@' in username:
+            try:
+                user = User.objects.get(email=username)
+                attrs['username'] = user.username
+            except User.DoesNotExist:
+                pass
+
+        data = super().validate(attrs)
+        return data
+
+

@@ -25,6 +25,14 @@ class Account(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     is_active = models.BooleanField(default=True)
+    theme = models.CharField(max_length=20, default="light")
+    timezone = models.CharField(max_length=50, default="UTC")
+    
+    # 2FA Fields (Email based)
+    two_factor_enabled = models.BooleanField(default=False)
+    otp_code = models.CharField(max_length=6, blank=True, null=True)
+    otp_expiry = models.DateTimeField(blank=True, null=True)
+    jwt_version = models.IntegerField(default=1)
 
     def __str__(self):
         return self.name
@@ -108,3 +116,21 @@ class AccountMember(models.Model):
 
     def __str__(self):
         return f"{self.user.username} in {self.account.name}"
+
+
+class SecurityQuestion(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    question = models.CharField(max_length=255)
+
+    def __str__(self):
+        return self.question
+
+
+class UserSecurityAnswer(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="security_answers")
+    question = models.ForeignKey(SecurityQuestion, on_delete=models.CASCADE)
+    answer = models.CharField(max_length=255)  # Should ideally be hashed
+
+    def __str__(self):
+        return f"{self.user.username} - {self.question.question}"

@@ -4,7 +4,9 @@ from .views import (
     SocialMediaSearchView, 
     AddKeywordView, 
     UserSentimentView,
-    UserKeywordSearchTriggerView
+    UserKeywordSearchTriggerView,
+    ScraperStatusView,
+    LiveSearchView
 )
 
 urlpatterns = [
@@ -13,4 +15,6 @@ urlpatterns = [
     path("keywords/", AddKeywordView.as_view()),
     path("my-sentiments/", UserSentimentView.as_view()),
     path("trigger-keyword-search/", UserKeywordSearchTriggerView.as_view()),
+    path("scraper-status/", ScraperStatusView.as_view()),
+    path("live-search/", LiveSearchView.as_view()),
 ]

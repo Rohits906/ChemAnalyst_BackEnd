@@ -42,4 +42,8 @@ coverage.xml
 .pyre_configuration
 .pyre_configuration.local
 .pyre_cache/
-.pyre_check/        
+.pyre_check/
+
+# Kafka Server
+kafka_server/
+*.tgz        
