@@ -25,87 +25,11 @@ from .serializers import (
     ChannelBarDataSerializer,
     ChannelRecentPostsSerializer,
     ChannelTopPostsSerializer,
+    SubscriberGrowthSerializer,
+    ChannelsListSerializer,
 )
 from .producers import queue_platform_fetch, queue_batch_platform_fetch
-from .platform_services import PlatformServiceFactory
-from .models import Platform as AddPlatform
-
-
-class PlatformListCreateView(APIView):
-    permission_classes = [IsAuthenticated]
-
-    def get(self, request):
-        try:
-            platforms = AddPlatform.objects.filter(user=request.user).order_by(
-                "-created_at"
-            )
-            data = []
-            for platform in platforms:
-                data.append(
-                    {
-                        "id": platform.id,
-                        "name": platform.name,
-                        "channel_url": platform.channel_url,
-                        "channel_id": platform.channel_id,
-                        "created_at": platform.created_at,
-                    }
-                )
-            return Response(
-                {"message": "Platforms fetched successfully", "data": data},
-                status=status.HTTP_200_OK,
-            )
-        except Exception as e:
-            return Response(
-                {"message": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
-
-    def post(self, request):
-        try:
-            data = request.data
-            name = data.get("name")
-            channel_url = data.get("channel_url")
-            channel_id = data.get("channel_id")
-
-            if not name or not channel_url or not channel_id:
-                return Response(
-                    {"message": "All fields required"},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-
-            AddPlatform.objects.create(
-                user=request.user,
-                name=name,
-                channel_url=channel_url,
-                channel_id=channel_id,
-            )
-            return Response(
-                {"message": "Platform Added Successfully"},
-                status=status.HTTP_201_CREATED,
-            )
-        except Exception as e:
-            return Response(
-                {"message": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
-
-
-class PlatformDeleteView(APIView):
-    permission_classes = [IsAuthenticated]
-
-    def delete(self, request, pk):
-        try:
-            platform = AddPlatform.objects.get(pk=pk, user=request.user)
-            platform.delete()
-            return Response(
-                {"message": "Platform deleted successfully"}, status=status.HTTP_200_OK
-            )
-        except AddPlatform.DoesNotExist:
-            return Response(
-                {"message": "Platform not found"}, status=status.HTTP_404_NOT_FOUND
-            )
-        except Exception as e:
-            return Response(
-                {"message": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
+from .youtube_service import fetch_youtube_channel_data
 
 
 class PlatformCreateView(APIView):
@@ -135,10 +59,12 @@ class PlatformCreateView(APIView):
                     status=status.HTTP_200_OK,
                 )
             else:
-                # Reactivate
                 existing.is_active = True
                 existing.save()
-                queue_platform_fetch(existing.id, "initial")
+
+                if existing.name == "youtube":
+                    fetch_youtube_channel_data(existing)
+
                 return Response(
                     {
                         "message": "Platform reactivated successfully",
@@ -146,24 +72,37 @@ class PlatformCreateView(APIView):
                     }
                 )
 
-        # Create new platform
         platform = Platform.objects.create(
             user=request.user,
             name=data["name"],
             channel_id=data["channel_id"],
             channel_url=data["channel_url"],
-            channel_name=data["channel_id"],  # Will be updated by fetch task
+            channel_name=data["channel_id"],
             metadata={},
         )
+        message = ""
+        try:
+            if platform.name == "youtube":
+                result = fetch_youtube_channel_data(platform)
+                if result:
+                    message = "Platform added successfully and data fetched!"
+                else:
+                    message = "Platform added but data fetch failed - YouTube API returned no data"
+            else:
+                # Other platforms not yet implemented
+                message = "Platform added successfully. Data fetching coming soon for this platform."
+        except Exception as e:
+            message = f"Platform added but data fetch failed: {str(e)}"
+            import logging
 
-        # Queue initial fetch
-        queue_platform_fetch(platform.id, "initial")
+            logger = logging.getLogger(__name__)
+            logger.error(
+                f"YouTube fetch error for {platform.channel_id}: {str(e)}",
+                exc_info=True,
+            )
 
         return Response(
-            {
-                "message": "Platform added successfully. Fetching data...",
-                "data": PlatformSerializer(platform).data,
-            },
+            {"message": message, "data": PlatformSerializer(platform).data},
             status=status.HTTP_201_CREATED,
         )
 
@@ -251,13 +190,27 @@ class PlatformDashboardView(APIView):
             "date_range": date_range,
         }
 
+        # Use to_representation directly for serializers that return lists
+        bar_chart_serializer = BarChartDataSerializer()
+        dashboard_stats_serializer = DashboardStatsSerializer()
+        top_live_serializer = TopLiveDataSerializer()
+        recent_posts_serializer = RecentProfilePostsSerializer()
+        subscriber_growth_serializer = SubscriberGrowthSerializer()
+
         response_data = {
-            "barData": BarChartDataSerializer(dashboard_data).data,
-            "stats": DashboardStatsSerializer(dashboard_data).data["stats"],
-            "topFive": TopLiveDataSerializer({"platforms": platforms, "limit": 5}).data,
-            "recentProfilePosts": RecentProfilePostsSerializer(
+            "barData": bar_chart_serializer.to_representation(dashboard_data),
+            "lineChart": subscriber_growth_serializer.to_representation(
+                {"platforms": platforms}
+            ),
+            "stats": dashboard_stats_serializer.to_representation(dashboard_data).get(
+                "stats", []
+            ),
+            "topFive": top_live_serializer.to_representation(
                 {"platforms": platforms, "limit": 5}
-            ).data,
+            ),
+            "recentProfilePosts": recent_posts_serializer.to_representation(
+                {"platforms": platforms, "limit": 5}
+            ),
         }
 
         return Response({"success": True, "data": response_data})
@@ -340,12 +293,19 @@ class PlatformChannelDataView(APIView):
             "limit": 10,
         }
 
+        # Use to_representation directly for these serializers
+        stats_serializer = ChannelStatsSummarySerializer()
+        bar_serializer = ChannelBarDataSerializer()
+        channel_info_serializer = ChannelInfoSerializer()
+        recent_posts_serializer = ChannelRecentPostsSerializer()
+        top_posts_serializer = ChannelTopPostsSerializer()
+
         response_data = {
-            "stats": ChannelStatsSummarySerializer(channel_data).data,
-            "barData": ChannelBarDataSerializer(channel_data).data,
-            "channelInfo": ChannelInfoSerializer(platform).data,
-            "recentPosts": ChannelRecentPostsSerializer(channel_data).data,
-            "topPosts": ChannelTopPostsSerializer(channel_data).data,
+            "stats": stats_serializer.to_representation(channel_data),
+            "barData": bar_serializer.to_representation(channel_data),
+            "channelInfo": channel_info_serializer.to_representation(platform),
+            "recentPosts": recent_posts_serializer.to_representation(channel_data),
+            "topPosts": top_posts_serializer.to_representation(channel_data),
             "comparisons": [
                 {"label": "Engagement", "value": "+12.5%", "trend": "up"},
                 {"label": "Reach", "value": "+8.3%", "trend": "up"},
@@ -411,3 +371,19 @@ class SentimentSearchTriggerView(APIView):
         return Response(
             {"message": f"Sentiment analysis triggered for {posts.count()} posts"}
         )
+
+
+class ChannelsListView(APIView):
+    """Get list of all channels for sidebar"""
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        platforms = Platform.objects.filter(
+            user=request.user, is_active=True
+        ).prefetch_related("stats", "posts")
+
+        channels_serializer = ChannelsListSerializer()
+        channels_data = channels_serializer.to_representation({"platforms": platforms})
+
+        return Response({"success": True, "channels": channels_data})

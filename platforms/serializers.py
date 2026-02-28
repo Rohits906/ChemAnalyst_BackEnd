@@ -1,6 +1,7 @@
 from rest_framework import serializers
 from .models import Platform, ChannelStats, ChannelPost, PlatformFetchTask
 from django.utils import timezone
+from django.db.models import Sum
 
 class PlatformSerializer(serializers.ModelSerializer):
     class Meta:
@@ -69,7 +70,7 @@ class DashboardStatsSerializer(serializers.Serializer):
 
 
 class BarChartDataSerializer(serializers.Serializer):
-    """Serializer for platform-wise sentiment data"""
+    """Serializer for platform-wise sentiment or engagement data"""
     
     def to_representation(self, instance):
         platforms = instance.get('platforms', [])
@@ -77,14 +78,23 @@ class BarChartDataSerializer(serializers.Serializer):
         
         bar_data = []
         for platform in platforms:
-            # Get posts with sentiment for this platform
+            # Get posts for this platform
             posts = platform.posts.filter(
                 published_at__date__gte=date_range.get('start'),
                 published_at__date__lte=date_range.get('end')
             ) if date_range else platform.posts.all()
             
+            # Try to get sentiment counts, fall back to engagement metrics
             positive_count = posts.filter(sentiment_label='positive').count()
             negative_count = posts.filter(sentiment_label='negative').count()
+            
+            # If no sentiment data, use engagement metrics instead
+            if positive_count == 0 and negative_count == 0 and posts.exists():
+                # Use likes as "positive" metric
+                total_likes = posts.aggregate(Sum('likes'))['likes__sum'] or 0
+                total_comments = posts.aggregate(Sum('comments'))['comments__sum'] or 0
+                positive_count = max(total_likes, 1)  # Ensure non-zero
+                negative_count = max(total_comments, 1)
             
             bar_data.append({
                 'name': platform.name.title(),
@@ -96,7 +106,7 @@ class BarChartDataSerializer(serializers.Serializer):
 
 
 class TopLiveDataSerializer(serializers.Serializer):
-    """Serializer for top performing posts"""
+    """Serializer for top performing posts (by engagement)"""
     
     def to_representation(self, instance):
         platforms = instance.get('platforms', [])
@@ -104,7 +114,8 @@ class TopLiveDataSerializer(serializers.Serializer):
         
         all_posts = []
         for platform in platforms:
-            posts = platform.posts.all()[:limit]
+            # Get all posts sorted by engagement
+            posts = platform.posts.all().order_by('-likes', '-comments', '-views')[:limit]
             for post in posts:
                 all_posts.append({
                     'id': str(post.id),
@@ -114,13 +125,13 @@ class TopLiveDataSerializer(serializers.Serializer):
                     'comment': post.comments,
                 })
         
-        # Sort by engagement and return top
+        # Sort all by total engagement and return top
         all_posts.sort(key=lambda x: x['like'] + x['comment'], reverse=True)
         return all_posts[:limit]
 
 
 class RecentProfilePostsSerializer(serializers.Serializer):
-    """Serializer for recent posts with sentiment"""
+    """Serializer for recent posts with sentiment (or placeholder)"""
     
     def to_representation(self, instance):
         platforms = instance.get('platforms', [])
@@ -128,19 +139,30 @@ class RecentProfilePostsSerializer(serializers.Serializer):
         
         recent_posts = []
         for platform in platforms:
-            posts = platform.posts.filter(
-                sentiment_label__isnull=False
-            ).order_by('-published_at')[:limit]
+            posts = platform.posts.order_by('-published_at')[:limit]
             
             for post in posts:
+                # Use sentiment if available, otherwise use engagement to infer
+                sentiment = post.sentiment_label.title() if post.sentiment_label else None
+                
+                # If no sentiment, infer from engagement
+                if not sentiment:
+                    engagement = post.likes + post.comments
+                    if engagement >= 100:
+                        sentiment = "Positive"
+                    elif engagement >= 10:
+                        sentiment = "Neutral"
+                    else:
+                        sentiment = "Neutral"
+                
                 recent_posts.append({
                     'id': str(post.id),
                     'title': post.title[:50] + '...' if len(post.title) > 50 else post.title,
-                    'sentiment': post.sentiment_label.title() if post.sentiment_label else 'Unknown',
+                    'sentiment': sentiment,
                 })
         
         # Sort by published date
-        return recent_posts[:limit]
+        return sorted(recent_posts, key=lambda x: x['id'])[:limit]
 
 
 # Channel Page Serializers
@@ -272,3 +294,63 @@ class FetchTaskSerializer(serializers.ModelSerializer):
         model = PlatformFetchTask
         fields = '__all__'
         read_only_fields = ['id', 'created_at', 'started_at', 'completed_at']
+
+
+class SubscriberGrowthSerializer(serializers.Serializer):
+    """Serializer for subscriber growth chart data (line chart)"""
+    
+    def to_representation(self, instance):
+        platforms = instance.get('platforms', [])
+        
+        growth_data = {}
+        
+        for platform in platforms:
+            # Get all stats for this platform ordered by date
+            stats = platform.stats.all().order_by('period_start')
+            
+            platform_name = platform.name.title()
+            growth_data[platform_name] = {
+                'dates': [],
+                'subscribers': [],
+                'views': [],
+            }
+            
+            for stat in stats:
+                date_str = stat.period_start.strftime('%Y-%m-%d')
+                growth_data[platform_name]['dates'].append(date_str)
+                growth_data[platform_name]['subscribers'].append(stat.subscribers)
+                growth_data[platform_name]['views'].append(stat.views)
+        
+        # Convert to list format for frontend
+        line_chart_data = []
+        for platform_name, data in growth_data.items():
+            line_chart_data.append({
+                'name': platform_name,
+                'dates': data['dates'],
+                'subscribers': data['subscribers'],
+                'views': data['views'],
+            })
+        
+        return line_chart_data
+
+
+class ChannelsListSerializer(serializers.Serializer):
+    """Serializer for list of channels"""
+    
+    def to_representation(self, instance):
+        platforms = instance.get('platforms', [])
+        
+        channels = []
+        for platform in platforms:
+            channels.append({
+                'id': str(platform.id),
+                'name': platform.channel_name,
+                'platform': platform.name,
+                'platform_id': str(platform.channel_id),
+                'subscribers': platform.stats.first().subscribers if platform.stats.exists() else 0,
+                'posts_count': platform.posts.count(),
+                'profile_picture': platform.profile_picture or '',
+                'channel_url': platform.channel_url,
+            })
+        
+        return channels

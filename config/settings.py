@@ -28,6 +28,7 @@ INSTALLED_APPS = [
     "contact",
     "platforms",
     "sentiment",
+    "reports",
 ]
 # AUTH_USER_MODEL = "authentication.User"
 
