@@ -5,6 +5,7 @@ urlpatterns = [
     # Platform CRUD
     path('create/', views.PlatformCreateView.as_view(), name='platform-create'),
     path('get/', views.PlatformListView.as_view(), name='platform-list'),
+    path('channels/', views.ChannelsListView.as_view(), name='channels-list'),
     path('<uuid:pk>/', views.PlatformDetailView.as_view(), name='platform-detail'),
     path('refresh/<uuid:platform_id>/', views.PlatformRefreshView.as_view(), name='platform-refresh'),
     path('refresh/', views.PlatformRefreshView.as_view(), name='platform-refresh-all'),
