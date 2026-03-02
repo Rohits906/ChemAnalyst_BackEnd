@@ -1,4 +1,5 @@
 import requests
+import logging
 from django.conf import settings
 from django.db.models import Count, Q, Sum, Avg
 from django.utils import timezone
@@ -20,6 +21,83 @@ from .serializers import (
 )
 from .producers import queue_platform_fetch, queue_batch_platform_fetch
 from .youtube_service import fetch_youtube_channel_data
+from .platform_services import PlatformServiceFactory
+
+logger = logging.getLogger(__name__)
+
+
+def fetch_platform_data(platform):
+    """
+    Fetch platform data using appropriate service based on platform type.
+    Creates ChannelStats and ChannelPost records.
+    Returns: (success: bool, message: str)
+    """
+    try:
+        # For YouTube, continue using existing fetch function for backward compatibility
+        if platform.name == "youtube":
+            result = fetch_youtube_channel_data(platform)
+            return bool(result), "YouTube data fetched successfully"
+        
+        # Use PlatformServiceFactory for other platforms
+        service = PlatformServiceFactory.get_service(platform)
+        if not service:
+            return False, f"No service implementation for platform: {platform.name}"
+        
+        # Fetch channel info
+        channel_info = service.fetch_channel_info()
+        if not channel_info:
+            return False, "Failed to fetch channel information"
+        
+        # Update platform with channel information
+        platform.channel_name = channel_info.get("channel_name", platform.channel_id)
+        platform.profile_picture = channel_info.get("profile_picture", "")
+        platform.metadata = channel_info
+        platform.save()
+        
+        # Create or update ChannelStats
+        stats, created = ChannelStats.objects.update_or_create(
+            platform=platform,
+            defaults={
+                "subscribers": channel_info.get("followers", 0),
+                "views": channel_info.get("total_views", 0),
+                "posts_count": channel_info.get("posts_count", 0),
+                "engagement_rate": 0.0,
+                "last_updated": timezone.now(),
+                "metadata": channel_info
+            }
+        )
+        
+        # Fetch and create posts
+        posts_data = service.fetch_posts(limit=15)
+        if posts_data:
+            for post_data in posts_data:
+                ChannelPost.objects.update_or_create(
+                    platform=platform,
+                    platform_post_id=post_data.get("platform_post_id"),
+                    defaults={
+                        "title": post_data.get("title", ""),
+                        "content": post_data.get("content", ""),
+                        "post_url": post_data.get("post_url", ""),
+                        "media_urls": post_data.get("media_urls", []),
+                        "media_type": post_data.get("media_type", ""),
+                        "likes": post_data.get("likes", 0),
+                        "comments": post_data.get("comments", 0),
+                        "shares": post_data.get("shares", 0),
+                        "views": post_data.get("views", 0),
+                        "published_at": post_data.get("published_at"),
+                        "metadata": {
+                            "engagement": post_data.get("likes", 0) + post_data.get("comments", 0),
+                            "reach": post_data.get("views", 0)
+                        }
+                    }
+                )
+        
+        return True, f"Platform data fetched successfully from {platform.name}"
+        
+    except Exception as e:
+        logger.error(f"Error fetching data for {platform.name} - {platform.channel_id}: {str(e)}", exc_info=True)
+        return False, f"Data fetch failed: {str(e)}"
+
 
 
 class PlatformCreateView(APIView):
@@ -44,20 +122,29 @@ class PlatformCreateView(APIView):
             if existing.is_active:
                 return Response({
                     "message": "Platform already exists",
-                    "data": PlatformSerializer(existing).data
+                    "data": PlatformSerializer(existing).data,
+                    "fetch_success": False
                 }, status=status.HTTP_200_OK)
             else:
                 # Reactivate and fetch data
                 existing.is_active = True
                 existing.save()
                 
-                # Fetch data based on platform type
-                if existing.name == "youtube":
-                    fetch_youtube_channel_data(existing)
+                # Fetch data using the generalized method
+                fetch_success, message = fetch_platform_data(existing)
+                
+                if not fetch_success:
+                    # queue retry when reactivating as well
+                    try:
+                        queue_platform_fetch(existing.id, "reactivate")
+                        message += "; fetch queued in background."
+                    except Exception as qex:
+                        logger.warning(f"Failed to queue background fetch for platform {existing.id}: {qex}")
                 
                 return Response({
-                    "message": "Platform reactivated successfully",
-                    "data": PlatformSerializer(existing).data
+                    "message": message if fetch_success else f"Platform reactivated but: {message}",
+                    "data": PlatformSerializer(existing).data,
+                    "fetch_success": fetch_success
                 })
         
         # Create new platform
@@ -70,27 +157,22 @@ class PlatformCreateView(APIView):
             metadata={}
         )
         
-        # Fetch data synchronously based on platform type
-        message = ""
-        try:
-            if platform.name == "youtube":
-                result = fetch_youtube_channel_data(platform)
-                if result:
-                    message = "Platform added successfully and data fetched!"
-                else:
-                    message = "Platform added but data fetch failed - YouTube API returned no data"
-            else:
-                # Other platforms not yet implemented
-                message = "Platform added successfully. Data fetching coming soon for this platform."
-        except Exception as e:
-            message = f"Platform added but data fetch failed: {str(e)}"
-            import logging
-            logger = logging.getLogger(__name__)
-            logger.error(f"YouTube fetch error for {platform.channel_id}: {str(e)}", exc_info=True)
+        # Fetch data using the generalized method
+        fetch_success, message = fetch_platform_data(platform)
+        
+        if not fetch_success:
+            # Try to queue background fetch for retry
+            try:
+                queue_platform_fetch(platform.id, "initial")
+                message += "; fetch queued for background processing."
+            except Exception as qex:
+                logger.warning(f"Failed to queue background fetch for platform {platform.id}: {qex}")
         
         return Response({
-            "message": message,
-            "data": PlatformSerializer(platform).data
+            "message": ("Platform added successfully and data fetched!" if fetch_success 
+                       else f"Platform added. {message}"),
+            "data": PlatformSerializer(platform).data,
+            "fetch_success": fetch_success
         }, status=status.HTTP_201_CREATED)
 
 
@@ -182,20 +264,30 @@ class PlatformDashboardView(APIView):
         recent_posts_serializer = RecentProfilePostsSerializer()
         subscriber_growth_serializer = SubscriberGrowthSerializer()
         
+        # build per-channel slide lists for top/live and recent posts
+        top_by_channel = []
+        recent_by_channel = []
+        for plat in platforms:
+            label = plat.channel_name or plat.name.title()
+            top_items = top_live_serializer.to_representation({
+                'platforms': [plat],
+                'limit': 5,
+            })
+            recent_items = recent_posts_serializer.to_representation({
+                'platforms': [plat],
+                'limit': 5,
+            })
+            top_by_channel.append({'channel': label, 'list': top_items})
+            recent_by_channel.append({'channel': label, 'list': recent_items})
+
         response_data = {
             'barData': bar_chart_serializer.to_representation(dashboard_data),
             'lineChart': subscriber_growth_serializer.to_representation({
                 'platforms': platforms
             }),
             'stats': dashboard_stats_serializer.to_representation(dashboard_data).get('stats', []),
-            'topFive': top_live_serializer.to_representation({
-                'platforms': platforms,
-                'limit': 5
-            }),
-            'recentProfilePosts': recent_posts_serializer.to_representation({
-                'platforms': platforms,
-                'limit': 5
-            })
+            'topFive': top_by_channel,
+            'recentProfilePosts': recent_by_channel,
         }
         
         return Response({
@@ -300,11 +392,6 @@ class PlatformChannelDataView(APIView):
             'channelInfo': channel_info_serializer.to_representation(platform),
             'recentPosts': recent_posts_serializer.to_representation(channel_data),
             'topPosts': top_posts_serializer.to_representation(channel_data),
-            'comparisons': [
-                {'label': 'Engagement', 'value': '+12.5%', 'trend': 'up'},
-                {'label': 'Reach', 'value': '+8.3%', 'trend': 'up'},
-                {'label': 'New Followers', 'value': '-2.1%', 'trend': 'down'},
-            ]
         }
         
         return Response(response_data)

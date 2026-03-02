@@ -17,9 +17,6 @@ def fetch_youtube_channel_data(platform_obj):
     Fetch YouTube channel stats and recent videos synchronously.
     Called immediately after platform creation.
     """
-    logger.info(f"=== Starting YouTube fetch for platform: {platform_obj.channel_id} ===")
-    logger.info(f"API Key configured: {bool(YOUTUBE_API_KEY)}")
-    logger.info(f"API Key value: {YOUTUBE_API_KEY[:10] if YOUTUBE_API_KEY else 'NOT SET'}...")
     
     if not YOUTUBE_API_KEY:
         logger.error("❌ YouTube API key not configured in settings or .env")
@@ -114,9 +111,6 @@ def fetch_youtube_channel_data(platform_obj):
         platform_obj.save()
         
         logger.info(f"✓ Updated platform info: {platform_obj.channel_name}")
-        logger.info(f"  Subscribers: {stats.get('subscriberCount', 'N/A')}")
-        logger.info(f"  Views: {stats.get('viewCount', 'N/A')}")
-        logger.info(f"  Videos: {stats.get('videoCount', 'N/A')}")
         
         # Create channel stats
         now = timezone.now()
