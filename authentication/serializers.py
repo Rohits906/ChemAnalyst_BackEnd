@@ -64,3 +64,33 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
         return data
 
 
+
+from .models import Permission, Role, AccountMember, Account
+
+class PermissionSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Permission
+        fields = ["permission_id", "description"]
+
+class RoleSerializer(serializers.ModelSerializer):
+    permissions = PermissionSerializer(many=True, read_only=True)
+    
+    class Meta:
+        model = Role
+        fields = ["id", "role_name", "permissions", "is_system_role"]
+
+class UserSummarySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = User
+        fields = ["id", "username", "email", "first_name", "last_name"]
+
+class AccountMemberSerializer(serializers.ModelSerializer):
+    user = UserSummarySerializer(read_only=True)
+    role = RoleSerializer(read_only=True)
+    role_id = serializers.PrimaryKeyRelatedField(
+        queryset=Role.objects.all(), source="role", write_only=True
+    )
+
+    class Meta:
+        model = AccountMember
+        fields = ["id", "user", "role", "role_id", "joined_at", "is_accepted"]

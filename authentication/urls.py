@@ -1,5 +1,12 @@
 from django.urls import path
-from .views import SignupView, LoginView, LogoutView, VerifyAuth, ProfileView, ChangePasswordView, DeleteAccountView, DeactivateAccountView, Enable2FAView, Verify2FAView, Disable2FAView, LoginVerify2FAView, SecurityQuestionListView, SetupSecurityQuestionsView
+from .views import (
+    SignupView, LoginView, LogoutView, VerifyAuth, ProfileView, 
+    ChangePasswordView, DeleteAccountView, DeactivateAccountView, 
+    Enable2FAView, Verify2FAView, Disable2FAView, LoginVerify2FAView, 
+    SecurityQuestionListView, SetupSecurityQuestionsView, Check2FAStatusView,
+    AccountMemberListView, AccountRoleListView, UpdateMemberRoleView, RemoveMemberView,
+    InviteMemberView, AcceptInvitationView, InvitationDetailView, ProcessInvitationView
+)
 
 urlpatterns = [
     path("signup/", SignupView.as_view(), name="signup"),
@@ -14,6 +21,15 @@ urlpatterns = [
     path("2fa/verify/", Verify2FAView.as_view(), name="verify-2fa"),
     path("2fa/disable/", Disable2FAView.as_view(), name="disable-2fa"),
     path("2fa/login-verify/", LoginVerify2FAView.as_view(), name="login-verify-2fa"),
+    path("2fa/check-status/", Check2FAStatusView.as_view(), name="check-2fa-status"),
     path("security-questions/", SecurityQuestionListView.as_view(), name="security-questions"),
     path("setup-security-questions/", SetupSecurityQuestionsView.as_view(), name="setup-security-questions"),
+    path("members/", AccountMemberListView.as_view(), name="account-members"),
+    path("roles/", AccountRoleListView.as_view(), name="account-roles"),
+    path("members/update-role/", UpdateMemberRoleView.as_view(), name="update-member-role"),
+    path("members/remove/<int:member_id>/", RemoveMemberView.as_view(), name="remove-member"),
+    path("members/invite/", InviteMemberView.as_view(), name="invite-member"),
+    path("members/accept/<str:token>/", AcceptInvitationView.as_view(), name="accept-member"),
+    path("members/invitation-details/<str:token>/", InvitationDetailView.as_view(), name="invitation-details"),
+    path("members/process-invitation/", ProcessInvitationView.as_view(), name="process-invitation"),
 ]

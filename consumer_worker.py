@@ -103,7 +103,7 @@ def run_kafka_consumer():
             bootstrap_servers=settings.KAFKA_BOOTSTRAP_SERVERS,
             value_deserializer=lambda x: json.loads(x.decode("utf-8")),
             group_id="sentiment-group",
-            auto_offset_reset="latest",
+            auto_offset_reset="earliest",
         )
         print(f"Started the Kafka consumer on topic: {settings.KAFKA_SENTIMENT_TOPIC}")
         for msg in sentiment_consumer:
@@ -113,45 +113,7 @@ def run_kafka_consumer():
         return False
     return True
 
-def run_mock_consumer():
-    mock_file = "mock_kafka_queue.jsonl"
-    print(f"Starting Mock Consumer on local file: {mock_file}")
-    print("Watching for new messages... (Press Ctrl+C to stop)")
-    
-    while True:
-        if os.path.exists(mock_file):
-            messages = []
-            try:
-                with open(mock_file, "r", encoding="utf-8") as f:
-                    for line in f:
-                        if line.strip():
-                            messages.append(json.loads(line))
-                
-                if messages:
-                    print(f"Found {len(messages)} messages in mock queue. Processing...")
-                    for data in messages:
-                        process_data(data)
-                    
-                    # Clear the file after processing
-                    open(mock_file, "w").close()
-                    print("Processed all messages and cleared mock queue.")
-            except Exception as e:
-                print(f"Error reading mock queue: {e}")
-        
-        time.sleep(2)
 
 if __name__ == "__main__":
-    # Try Kafka first
-    success = False
-    try:
-        from kafka import KafkaConsumer
-        # Fast check if brokers are available
-        import socket
-        host, port = settings.KAFKA_BOOTSTRAP_SERVERS.split(':')
-        with socket.create_connection((host, int(port)), timeout=2):
-            success = run_kafka_consumer()
-    except (ImportError, ConnectionRefusedError, socket.timeout, Exception):
-        print("Kafka is not available. Falling back to Mock Consumer.")
-    
-    if not success:
-        run_mock_consumer()
+    if not run_kafka_consumer():
+        print("Failed to start Kafka consumer. Ensure Kafka is running.")

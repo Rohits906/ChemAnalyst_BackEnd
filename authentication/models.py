@@ -110,6 +110,8 @@ class AccountMember(models.Model):
     )
 
     joined_at = models.DateTimeField(auto_now_add=True)
+    is_accepted = models.BooleanField(default=False)
+    invitation_token = models.CharField(max_length=100, blank=True, null=True)
 
     class Meta:
         unique_together = ("account", "user")

@@ -289,7 +289,7 @@ class SocialMediaSearchView(APIView):
             "expansions": "author_id,geo.place_id",
             "user.fields": "username,name",
             "place.fields": "full_name,geo",
-            "max_results": 15,
+            "max_results": 100,
         }
         try:
             print(f"Twitter search for keyword: {keyword}")
@@ -404,39 +404,60 @@ class SocialMediaSearchView(APIView):
 
     def _get_cities(self):
         return {
+            # India
             "delhi": (28.6139, 77.2090),
             "दिल्ल्ली": (28.6139, 77.2090),
             "नई दिल्ली": (28.6139, 77.2090),
             "mumbai": (19.0760, 72.8777),
             "मुंबई": (19.0760, 72.8777),
-            "बम्बई": (19.0760, 72.8777),
             "bangalore": (12.9716, 77.5946),
             "bengaluru": (12.9716, 77.5946),
-            "बेंगलुरु": (12.9716, 77.5946),
-            "बेंगलोर": (12.9716, 77.5946),
             "chennai": (13.0827, 80.2707),
-            "चेन्नई": (13.0827, 80.2707),
             "kolkata": (22.5726, 88.3639),
-            "कोलकाता": (22.5726, 88.3639),
             "hyderabad": (17.3850, 78.4867),
-            "हैदराबाद": (17.3850, 78.4867),
             "pune": (18.5204, 73.8567),
-            "पुणे": (18.5204, 73.8567),
             "ahmedabad": (23.0225, 72.5714),
-            "अहमदाबाद": (23.0225, 72.5714),
             "jaipur": (26.9124, 75.7873),
-            "जयपुर": (26.9124, 75.7873),
             "lucknow": (26.8467, 80.9462),
-            "लखनऊ": (26.8467, 80.9462),
-            "kanpur": (26.4499, 80.3319),
-            "कानपुर": (26.4499, 80.3319),
             "noida": (28.5355, 77.3910),
-            "नोएडा": (28.5355, 77.3910),
             "gurgaon": (28.4595, 77.0266),
-            "gurugram": (28.4595, 77.0266),
-            "गुरुग्राम": (28.4595, 77.0266),
             "india": (20.5937, 78.9629),
             "भारत": (20.5937, 78.9629),
+
+            # World Countries
+            "israel": (31.0461, 34.8516),
+            "usa": (37.0902, -95.7129),
+            "united states": (37.0902, -95.7129),
+            "america": (37.0902, -95.7129),
+            "russia": (61.5240, 105.3188),
+            "ukraine": (48.3794, 31.1656),
+            "china": (35.8617, 104.1954),
+            "uk": (55.3781, -3.4360),
+            "united kingdom": (55.3781, -3.4360),
+            "germany": (51.1657, 10.4515),
+            "france": (46.2276, 2.2137),
+            "canada": (56.1304, -106.3468),
+            "australia": (-25.2744, 133.7751),
+            "japan": (36.2048, 138.2529),
+            "brazil": (-14.2350, -51.9253),
+            "pakistan": (30.3753, 69.3451),
+            "bangladesh": (23.6850, 90.3563),
+            "uae": (23.4241, 53.8478),
+            "dubai": (25.2048, 55.2708),
+            "saudi arabia": (23.8859, 45.0792),
+
+            # Global Cities / Trending Locations
+            "tel aviv": (32.0853, 34.7818),
+            "jerusalem": (31.7683, 35.2137),
+            "gaza": (31.5017, 34.4668),
+            "kyiv": (50.4501, 30.5234),
+            "moscow": (55.7558, 37.6173),
+            "new york": (40.7128, -74.0060),
+            "london": (51.5074, -0.1278),
+            "paris": (48.8566, 2.3522),
+            "tokyo": (35.6762, 139.6503),
+            "washington": (38.9072, -77.0369),
+            "beijing": (39.9042, 116.4074),
         }
 
     def perform_search(self, keyword):
@@ -515,51 +536,14 @@ class SocialMediaSearchView(APIView):
             )
             current_idd += 1
         
-        if not all_posts:
-            self._generate_mock_data(all_posts, keyword, current_idd)
-
         add_to_sentiment_queue(all_posts, keyword=keyword)
         
         return {
-            "youtube": len(youtube_raw) if len(youtube_raw) > 0 else 2,
-            "instagram": len(instagram_raw) if len(instagram_raw) > 0 else 2,
-            "twitter": len(twitter_raw) if len(twitter_raw) > 0 else 1,
+            "youtube": len(youtube_raw),
+            "instagram": len(instagram_raw),
+            "twitter": len(twitter_raw),
         }
 
-    def _generate_mock_data(self, all_posts, keyword, current_idd):
-        platforms = ["twitter", "instagram", "youtube"]
-        sentiments_text = [
-            f"This is an amazing update about {keyword}!",
-            f"I have mixed feelings regarding {keyword} today.",
-            f"Terrible news concerning {keyword}, very disappointed.",
-            f"Can someone explain the {keyword} situation?",
-            f"Absolutely love what is happening with {keyword}!"
-        ]
-        locations = ["Delhi", "Mumbai", "Bangalore", "Chennai", "Kolkata", "Hyderabad", "Pune", "Ahmedabad", "Jaipur", "Lucknow", "India"]
-
-        for _ in range(5):
-            text = random.choice(sentiments_text)
-            loc_str = random.choice(locations)
-            loc_name, lat, lng = self._extract_location(loc_str, keyword)
-            loc_type = "country" if loc_str == "India" else "city"
-            all_posts.append(
-                {
-                    "id": current_idd,
-                    "post_id": f"mock_{uuid.uuid4().hex[:8]}",
-                    "post_title": text[:50],
-                    "post_text": text,
-                    "post_url": "https://example.com/mock",
-                    "platform": random.choice(platforms),
-                    "author": f"mock_user_{random.randint(100, 999)}",
-                    "published_at": timezone.now().isoformat(),
-                    "extra_details": {"is_mock": True},
-                    "location_name": loc_name,
-                    "location_type": loc_type,
-                    "latitude": lat,
-                    "longitude": lng,
-                }
-            )
-            current_idd += 1
 
     def get(self, request):
         keyword = request.query_params.get("keyword")
