@@ -35,7 +35,7 @@ class YouTubeService(BasePlatformService):
         if "youtube.com/channel/" in url:
             return url.split("youtube.com/channel/")[-1].split("/")[0]
         elif "youtube.com/c/" in url or "youtube.com/user/" in url:
-            # Need to resolve custom URLs
+            # Resolve custom URLs
             username = url.split("/")[-1]
             search_url = f"{self.base_url}/search"
             params = {
@@ -131,22 +131,27 @@ class TwitterService(BasePlatformService):
         
     def fetch_channel_info(self):
         # Twitter API v2 for user lookup
-        url = f"{self.base_url}/users/by/username/{self.platform.channel_id}"
+        username = self.platform.channel_id.lstrip("@")
+        url = f"{self.base_url}/users/by/username/{username}"
         params = {
             "user.fields": "public_metrics,description,profile_image_url,created_at"
         }
         
         response = requests.get(url, headers=self._get_headers(), params=params)
+        if response.status_code != 200:
+            # raise exception so caller can log detailed error
+            raise Exception(f"Twitter user lookup failed ({response.status_code}): {response.text}")
+        
         data = response.json()
         
         if not data.get("data"):
-            return None
+            raise Exception(f"Twitter returned no user data for '{username}'")
             
         user = data["data"]
         metrics = user.get("public_metrics", {})
         
         return {
-            "channel_name": user["name"],
+            "channel_name": user.get("name", username),
             "profile_picture": user.get("profile_image_url", ""),
             "followers": metrics.get("followers_count", 0),
             "following": metrics.get("following_count", 0),
@@ -155,9 +160,14 @@ class TwitterService(BasePlatformService):
         }
         
     def fetch_posts(self, limit=50):
-        # First get user ID
-        user_url = f"{self.base_url}/users/by/username/{self.platform.channel_id}"
+        # First get user ID (strip @ if present)
+        username = self.platform.channel_id.lstrip("@")
+        user_url = f"{self.base_url}/users/by/username/{username}"
         user_response = requests.get(user_url, headers=self._get_headers())
+        if user_response.status_code != 200:
+            logger = __import__('logging').getLogger(__name__)
+            logger.warning(f"Twitter user ID lookup failed ({user_response.status_code}): {user_response.text}")
+            return []
         user_data = user_response.json()
         
         if not user_data.get("data"):
@@ -175,6 +185,8 @@ class TwitterService(BasePlatformService):
         }
         
         response = requests.get(tweets_url, headers=self._get_headers(), params=params)
+        if response.status_code != 200:
+            raise Exception(f"Twitter tweets fetch failed ({response.status_code}): {response.text}")
         data = response.json()
         
         posts = []
@@ -268,6 +280,118 @@ class InstagramService(BasePlatformService):
         return posts
 
 
+class LinkedInService(BasePlatformService):
+    def __init__(self, platform):
+        super().__init__(platform)
+        self.access_token = settings.LINKEDIN_ACCESS_TOKEN
+        self.base_url = "https://api.linkedin.com/v2"
+        
+    def fetch_channel_info(self):
+        """Fetch LinkedIn profile/company information"""
+        # Stub implementation - LinkedIn API requires OAuth2 and specific permissions
+        try:
+            headers = {"Authorization": f"Bearer {self.access_token}"}
+            url = f"{self.base_url}/me"
+            
+            response = requests.get(url, headers=headers)
+            if response.status_code != 200:
+                return None
+            
+            user_data = response.json()
+            
+            return {
+                "channel_name": f"{user_data.get('localizedFirstName', '')} {user_data.get('localizedLastName', '')}",
+                "profile_picture": user_data.get("profilePicture", {}).get("displayImage", ""),
+                "followers": 0,  # LinkedIn API doesn't expose follower count in simple way
+                "posts_count": 0,  # Would require additional endpoint
+            }
+        except Exception as e:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(f"LinkedIn fetch_channel_info failed: {str(e)}")
+            return None
+        
+    def fetch_posts(self, limit=50):
+        """Fetch LinkedIn posts - stub implementation"""
+        return []
+
+
+class FacebookService(BasePlatformService):
+    def __init__(self, platform):
+        super().__init__(platform)
+        self.page_token = settings.FACEBOOK_PAGE_ACCESS_TOKEN
+        self.base_url = "https://graph.facebook.com/v22.0"
+        
+    def fetch_channel_info(self):
+        """Fetch Facebook page information"""
+        try:
+            page_id = self.platform.channel_id  # Facebook page ID
+            url = f"{self.base_url}/{page_id}"
+            
+            params = {
+                "fields": "id,name,picture,followers_count,fan_count",
+                "access_token": self.page_token
+            }
+            
+            response = requests.get(url, params=params)
+            if response.status_code != 200:
+                return None
+                
+            page_data = response.json()
+            
+            return {
+                "channel_name": page_data.get("name", ""),
+                "profile_picture": page_data.get("picture", {}).get("data", {}).get("url", ""),
+                "followers": page_data.get("followers_count", 0) or page_data.get("fan_count", 0),
+                "posts_count": 0,  # Would require additional endpoint
+            }
+        except Exception as e:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(f"Facebook fetch_channel_info failed: {str(e)}")
+            return None
+        
+    def fetch_posts(self, limit=50):
+        """Fetch Facebook posts"""
+        try:
+            page_id = self.platform.channel_id
+            url = f"{self.base_url}/{page_id}/posts"
+            
+            params = {
+                "fields": "id,message,story,created_time,permalink_url,likes.summary(true).limit(0),comments.summary(true).limit(0),shares",
+                "limit": limit,
+                "access_token": self.page_token
+            }
+            
+            response = requests.get(url, params=params)
+            if response.status_code != 200:
+                return []
+                
+            posts_data = response.json().get("data", [])
+            
+            posts = []
+            for post in posts_data:
+                posts.append({
+                    "platform_post_id": post.get("id", ""),
+                    "title": (post.get("message", post.get("story", ""))[:100] + "...") if post.get("message") or post.get("story") else "Facebook Post",
+                    "content": post.get("message", post.get("story", "")),
+                    "post_url": post.get("permalink_url", ""),
+                    "media_urls": [],
+                    "media_type": "text",
+                    "likes": post.get("likes", {}).get("summary", {}).get("total_count", 0),
+                    "comments": post.get("comments", {}).get("summary", {}).get("total_count", 0),
+                    "shares": post.get("shares", {}).get("count", 0),
+                    "published_at": post.get("created_time"),
+                })
+            
+            return posts
+        except Exception as e:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(f"Facebook fetch_posts failed: {str(e)}")
+            return []
+
+
 class PlatformServiceFactory:
     """Factory to create appropriate platform service"""
     
@@ -277,7 +401,8 @@ class PlatformServiceFactory:
             "youtube": YouTubeService,
             "twitter": TwitterService,
             "instagram": InstagramService,
-            # Add other platforms as needed
+            "linkedin": LinkedInService,
+            "facebook": FacebookService,
         }
         
         service_class = services.get(platform.name)

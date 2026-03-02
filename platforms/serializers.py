@@ -119,8 +119,9 @@ class TopLiveDataSerializer(serializers.Serializer):
             for post in posts:
                 all_posts.append({
                     'id': str(post.id),
-                    'link': post.post_url,
+                            'link': post.post_url,
                     'platform': platform.name.title(),
+                    'channel': platform.channel_name or platform.name.title(),
                     'like': post.likes,
                     'comment': post.comments,
                 })
@@ -158,6 +159,7 @@ class RecentProfilePostsSerializer(serializers.Serializer):
                 recent_posts.append({
                     'id': str(post.id),
                     'title': post.title[:50] + '...' if len(post.title) > 50 else post.title,
+                    'channel': platform.channel_name or platform.name.title(),
                     'sentiment': sentiment,
                 })
         
@@ -210,7 +212,7 @@ class ChannelStatsSummarySerializer(serializers.Serializer):
                 {'label': 'Followers', 'value': stats.followers, 'change': 3.5},
                 {'label': 'Tweets', 'value': stats.posts_count, 'change': 1.2},
                 {'label': 'Impressions', 'value': stats.impressions, 'change': 5.6},
-                {'label': 'Retweets', 'value': stats.shares, 'change': 2.8},
+                {'label': 'Retweets', 'value': stats.total_shares if hasattr(stats, 'total_shares') else 0, 'change': 2.8},
             ],
             'linkedin': [
                 {'label': 'Connections', 'value': stats.followers, 'change': 2.9},
@@ -233,21 +235,20 @@ class ChannelBarDataSerializer(serializers.Serializer):
     """Serializer for channel engagement bar chart"""
     
     def to_representation(self, instance):
-        platform = instance.get('platform')
-        posts = instance.get('posts', [])
-        
-        # Group by date and calculate positive/negative
-        # This is a simplified version - you might want more sophisticated aggregation
+        # use supplied posts (already filtered by date range) or all posts
+        posts = instance.get('posts')
+        if posts is None:
+            platform = instance.get('platform')
+            posts = platform.posts.all()
+
+        # simple bar counts: likes vs comments per post or stub daily
         bar_data = []
-        
-        # For demo, create weekly data points
-        for i in range(7):
+        for post in posts:
             bar_data.append({
-                'name': f'Day {i+1}',
-                'pos': 5 + i,
-                'neg': 3 + i//2,
+                'name': post.published_at.strftime('%Y-%m-%d'),
+                'likes': post.likes or 0,
+                'comments': post.comments or 0,
             })
-        
         return bar_data
 
 
@@ -255,10 +256,16 @@ class ChannelRecentPostsSerializer(serializers.Serializer):
     """Serializer for channel's recent posts"""
     
     def to_representation(self, instance):
-        platform = instance.get('platform')
+        # allow caller to supply filtered posts queryset/list
+        posts = instance.get('posts')
         limit = instance.get('limit', 10)
         
-        posts = platform.posts.all()[:limit]
+        if posts is None:
+            platform = instance.get('platform')
+            posts = platform.posts.all()
+        
+        # if queryset, apply limit
+        posts = posts[:limit]
         
         return [{
             'id': str(post.id),
@@ -274,11 +281,18 @@ class ChannelTopPostsSerializer(serializers.Serializer):
     """Serializer for channel's top performing posts"""
     
     def to_representation(self, instance):
-        platform = instance.get('platform')
         limit = instance.get('limit', 5)
+        posts = instance.get('posts')
+        if posts is None:
+            platform = instance.get('platform')
+            posts = platform.posts.all()
         
-        # Get posts sorted by engagement
-        posts = platform.posts.all().order_by('-likes', '-comments')[:limit]
+        # ensure we can sort; if it's a queryset fine, otherwise convert to list
+        try:
+            sorted_posts = posts.order_by('-likes', '-comments')
+        except Exception:
+            sorted_posts = sorted(posts, key=lambda p: (-(p.likes or 0), -(p.comments or 0)))
+        sorted_posts = sorted_posts[:limit]
         
         return [{
             'title': post.title,
@@ -286,7 +300,7 @@ class ChannelTopPostsSerializer(serializers.Serializer):
             'comments': post.comments,
             'shares': post.shares,
             'growth': 12 + i * 3,  # Calculate actual growth
-        } for i, post in enumerate(posts)]
+        } for i, post in enumerate(sorted_posts)]
 
 
 class FetchTaskSerializer(serializers.ModelSerializer):
@@ -342,13 +356,28 @@ class ChannelsListSerializer(serializers.Serializer):
         
         channels = []
         for platform in platforms:
+            # Get latest stats record (contains correct video/post counts from YouTube API)
+            latest_stats = platform.stats.first()
+            
+            # derive display label including platform name
+            display_label = f"{platform.name.title()} - {platform.channel_name}"
+            
+            # use view count as the 'likes' metric for YouTube
+            likes_value = latest_stats.views if (latest_stats and platform.name == 'youtube') else (latest_stats.total_likes if latest_stats else 0)
+            
             channels.append({
                 'id': str(platform.id),
                 'name': platform.channel_name,
+                'display': display_label,
                 'platform': platform.name,
                 'platform_id': str(platform.channel_id),
-                'subscribers': platform.stats.first().subscribers if platform.stats.exists() else 0,
-                'posts_count': platform.posts.count(),
+                'subscribers': latest_stats.subscribers if latest_stats else 0,
+                'posts_count': latest_stats.posts_count if latest_stats else 0,  # From ChannelStats, not post count
+                'followers': latest_stats.followers if latest_stats else 0,
+                'total_likes': likes_value,
+                'total_comments': latest_stats.total_comments if latest_stats else 0,
+                'videos': latest_stats.posts_count if latest_stats else 0,  # Alias for YouTube
+                'views': latest_stats.views if latest_stats else 0,  # For YouTube watch time
                 'profile_picture': platform.profile_picture or '',
                 'channel_url': platform.channel_url,
             })
