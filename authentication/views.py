@@ -1,5 +1,6 @@
 from rest_framework.views import APIView
 from rest_framework.response import Response
+from django.utils.crypto import get_random_string
 
 from rest_framework.permissions import IsAuthenticated
 from rest_framework_simplejwt.views import TokenObtainPairView
@@ -554,11 +555,31 @@ class InviteMemberView(APIView):
         if not account or account.account_owner != request.user:
             return Response({"success": False, "message": "Only account owners can invite members."}, status=403)
 
-        # 2. Check if target user exists
+        is_new_user = False
+        temp_password = None
+        
         try:
             target_user = User.objects.get(email=email)
         except User.DoesNotExist:
-            return Response({"success": False, "message": f"User with email {email} not found in our system."}, status=404)
+            # Create a new user with placeholder details
+            is_new_user = True
+            username_prefix = email.split('@')[0]
+            
+            # Ensure unique username
+            base_username = username_prefix
+            counter = 1
+            while User.objects.filter(username=base_username).exists():
+                base_username = f"{username_prefix}{counter}"
+                counter += 1
+                
+            temp_password = get_random_string(length=12)
+            target_user = User.objects.create_user(
+                username=base_username,
+                email=email,
+                password=temp_password,
+                first_name=username_prefix.capitalize(),
+                is_active=False
+            )
 
         # 3. Check if already a member
         if AccountMember.objects.filter(account=account, user=target_user).exists():
@@ -585,16 +606,33 @@ class InviteMemberView(APIView):
         accept_url = f"{frontend_url}/accept-invitation/{token}/"
         
         subject = f"Invitation: You've been added to {account.account_name if hasattr(account, 'account_name') else 'a team'} on ChemAnalyst"
-        message = (
-            f"Hello {target_user.username},\n\n"
-            f"You have been invited to join a team account on ChemAnalyst.\n\n"
-            f"Role Assigned: {role.role_name}\n"
-            f"Added by: {request.user.username}\n\n"
-            f"Please click the link below to accept the invitation and activate your membership:\n"
-            f"{accept_url}\n\n"
-            f"Regards,\n"
-            f"ChemAnalyst Team"
-        )
+        
+        if is_new_user:
+            message = (
+                f"Hello {target_user.first_name},\n\n"
+                f"You have been invited to join a team account on ChemAnalyst.\n\n"
+                f"Role Assigned: {role.role_name}\n"
+                f"Added by: {request.user.first_name or request.user.username}\n\n"
+                f"An account has been created for you. Here are your temporary login credentials:\n"
+                f"Email: {target_user.email}\n"
+                f"Password: {temp_password}\n\n"
+                f"Please click the link below to accept the invitation and activate your membership:\n"
+                f"{accept_url}\n\n"
+                f"Regards,\n"
+                f"ChemAnalyst Team"
+            )
+        else:
+            message = (
+                f"Hello {target_user.first_name or target_user.username},\n\n"
+                f"You have been invited to join a team account on ChemAnalyst.\n\n"
+                f"Role Assigned: {role.role_name}\n"
+                f"Added by: {request.user.first_name or request.user.username}\n\n"
+                f"Please click the link below to accept the invitation and activate your membership:\n"
+                f"{accept_url}\n\n"
+                f"Regards,\n"
+                f"ChemAnalyst Team"
+            )
+            
         from_email = settings.DEFAULT_FROM_EMAIL
         recipient_list = [target_user.email]
 
@@ -659,6 +697,13 @@ class ProcessInvitationView(APIView):
                 membership.is_accepted = True
                 membership.invitation_token = None
                 membership.save()
+                
+                # Activate the user account so they can log in
+                user = membership.user
+                if not user.is_active:
+                    user.is_active = True
+                    user.save()
+                    
                 return Response({"success": True, "message": "Invitation accepted successfully."})
             else:
                 membership.delete()
