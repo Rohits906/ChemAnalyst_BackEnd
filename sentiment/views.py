@@ -167,6 +167,11 @@ class SocialMediaSearchView(APIView):
         ):
             return []
 
+        from django.utils import timezone
+        from datetime import timedelta
+        # strictly 24 hours ago
+        time_threshold = timezone.now() - timedelta(hours=24)
+
         hashtag = keyword.replace(" ", "").lower()
         search_url = "https://graph.facebook.com/v22.0/ig_hashtag_search"
         params = {
@@ -203,7 +208,17 @@ class SocialMediaSearchView(APIView):
                 if "error" in media_data:
                     print(f"Instagram {endpoint} API Error: {media_data['error'].get('message')}")
                 if "data" in media_data:
+                    from dateutil import parser
                     for item in media_data["data"]:
+                        timestamp_str = item.get("timestamp")
+                        if timestamp_str:
+                            try:
+                                item_time = parser.isoparse(timestamp_str)
+                                if item_time < time_threshold:
+                                    continue # Skip older posts
+                            except Exception:
+                                pass
+
                         if item["id"] not in seen_ids:
                             posts.append(item)
                             seen_ids.add(item["id"])
@@ -216,6 +231,12 @@ class SocialMediaSearchView(APIView):
     def _fetch_youtube(self, keyword):
         if not settings.YOUTUBE_API_KEY:
             return []
+        from django.utils import timezone
+        from datetime import timedelta
+        # strictly 24 hours ago
+        time_threshold = timezone.now() - timedelta(hours=24)
+        published_after_iso = time_threshold.strftime("%Y-%m-%dT%H:%M:%SZ")
+
         url = "https://www.googleapis.com/youtube/v3/search"
         params = {
             "part": "snippet",
@@ -223,6 +244,7 @@ class SocialMediaSearchView(APIView):
             "type": "video",
             "key": settings.YOUTUBE_API_KEY,
             "maxResults": 50,
+            "publishedAfter": published_after_iso,
         }
         try:
             print(f"YouTube search for keyword: {keyword}")
@@ -280,6 +302,12 @@ class SocialMediaSearchView(APIView):
     def _fetch_twitter(self, keyword):
         if not settings.TWITTER_BEARER_TOKEN:
             return []
+        from django.utils import timezone
+        from datetime import timedelta
+        # strictly 24 hours ago
+        time_threshold = timezone.now() - timedelta(hours=24)
+        start_time_iso = time_threshold.strftime("%Y-%m-%dT%H:%M:%SZ")
+
         url = "https://api.twitter.com/2/tweets/search/recent"
         headers = {"Authorization": f"Bearer {settings.TWITTER_BEARER_TOKEN}"}
         # Added expansions and user.fields to get username
@@ -290,6 +318,7 @@ class SocialMediaSearchView(APIView):
             "user.fields": "username,name",
             "place.fields": "full_name,geo",
             "max_results": 100,
+            "start_time": start_time_iso,
         }
         try:
             print(f"Twitter search for keyword: {keyword}")
@@ -691,7 +720,14 @@ class UserSentimentView(APIView):
         else:
             user_keywords = []
 
-        sentiments = Sentiment.objects.select_related("post").order_by("-analyzed_at")
+        from django.utils import timezone
+        from datetime import timedelta
+
+        # strictly show only the latest 24 hours of data as per user request
+        time_threshold = timezone.now() - timedelta(hours=24)
+        sentiments = Sentiment.objects.select_related("post").filter(
+            post__published_at__gte=time_threshold
+        ).order_by("-analyzed_at")
 
         if keyword_filter:
             # If a specific keyword is requested via query param
