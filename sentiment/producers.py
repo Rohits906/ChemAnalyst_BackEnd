@@ -6,14 +6,17 @@ try:
     sentiment_producer = KafkaProducer(
         bootstrap_servers=settings.KAFKA_BOOTSTRAP_SERVERS,
         value_serializer=lambda v: json.dumps(v).encode("utf-8"),
+        api_version=(0, 10, 2),
+        request_timeout_ms=2000,
+        max_block_ms=2000,
     )
 except Exception as e:
     print(f"Could not connect to Kafka: {e}")
     sentiment_producer = None
 
-def add_to_sentiment_quene(data, keyword="N/A"):
+def add_to_sentiment_queue(data, keyword="N/A"):
     if not sentiment_producer:
-        print("Kafka producer is not initialized.")
+        print("Kafka producer is not initialized. Search results will not be processed.")
         return
     
     for post in data:
