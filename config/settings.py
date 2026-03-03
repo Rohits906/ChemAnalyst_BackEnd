@@ -29,6 +29,7 @@ INSTALLED_APPS = [
     "contact",
     "platforms",
     "sentiment",
+    "reports",
 ]
 # AUTH_USER_MODEL = "authentication.User"
 
@@ -112,6 +113,7 @@ TWITTER_BEARER_TOKEN = config("TWITTER_BEARER_TOKEN", default="")
 
 # KAFKA CONFIG
 KAFKA_BOOTSTRAP_SERVERS = config("KAFKA_BOOTSTRAP_SERVERS", default="localhost:9092")
+KAFKA_PLATFORM_FETCH_TOPIC = 'platform-fetch-tasks'
 KAFKA_SENTIMENT_TOPIC = "sentiment_quene"
 
 SIMPLE_JWT = {
