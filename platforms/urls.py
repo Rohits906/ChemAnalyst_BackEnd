@@ -21,6 +21,10 @@ urlpatterns = [
     # Fetch tasks
     path('tasks/', views.PlatformFetchTasksView.as_view(), name='platform-tasks'),
     
+    # OAuth helpers for non-YouTube platforms
+    path('oauth/initiate/<str:platform>/', views.OAuthInitiateView.as_view(), name='platform-oauth-initiate'),
+    path('oauth/callback/<str:platform>/', views.OAuthCallbackView.as_view(), name='platform-oauth-callback'),
+
     # Sentiment analysis triggers
     path('<uuid:platform_id>/analyze-sentiment/', 
          views.SentimentSearchTriggerView.as_view(), 

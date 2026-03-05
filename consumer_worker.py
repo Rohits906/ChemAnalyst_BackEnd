@@ -12,6 +12,7 @@ django.setup()
 from django.conf import settings
 from transformers import pipeline
 from sentiment.models import Post, Sentiment
+from platforms.models import ChannelPost
 
 MODEL_NAME = "cardiffnlp/twitter-roberta-base-sentiment"
 sentiment_pipeline = pipeline(
@@ -93,6 +94,19 @@ for msg in sentiment_consumer:
             confidence_score=analysis["confidence_score"],
             model_used=MODEL_NAME
         )
+
+        # Update ChannelPost sentiment if it exists
+        try:
+            channel_post = ChannelPost.objects.filter(
+                platform__name=platform,
+                platform_post_id=platform_post_id
+            ).first()
+            if channel_post:
+                channel_post.sentiment_label = analysis["sentiment"]
+                channel_post.sentiment_score = analysis["confidence_score"]
+                channel_post.save()
+        except Exception as e:
+            print(f"Warning: Could not update ChannelPost sentiment: {e}")
 
         print(f"Successfully saved sentiment for post {platform_post_id}: {analysis['sentiment']}")
 

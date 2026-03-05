@@ -85,16 +85,13 @@ class BarChartDataSerializer(serializers.Serializer):
             ) if date_range else platform.posts.all()
             
             # Try to get sentiment counts, fall back to engagement metrics
-            positive_count = posts.filter(sentiment_label='positive').count()
-            negative_count = posts.filter(sentiment_label='negative').count()
+            positive_count = posts.filter(sentiment_label__iexact='positive').count()
+            negative_count = posts.filter(sentiment_label__iexact='negative').count()
             
-            # If no sentiment data, use engagement metrics instead
+            # If no sentiment data, use 0 (no sentiment analysis yet)
             if positive_count == 0 and negative_count == 0 and posts.exists():
-                # Use likes as "positive" metric
-                total_likes = posts.aggregate(Sum('likes'))['likes__sum'] or 0
-                total_comments = posts.aggregate(Sum('comments'))['comments__sum'] or 0
-                positive_count = max(total_likes, 1)  # Ensure non-zero
-                negative_count = max(total_comments, 1)
+                positive_count = 0
+                negative_count = 0
             
             bar_data.append({
                 'name': platform.name.title(),
@@ -146,15 +143,8 @@ class RecentProfilePostsSerializer(serializers.Serializer):
                 # Use sentiment if available, otherwise use engagement to infer
                 sentiment = post.sentiment_label.title() if post.sentiment_label else None
                 
-                # If no sentiment, infer from engagement
-                if not sentiment:
-                    engagement = post.likes + post.comments
-                    if engagement >= 100:
-                        sentiment = "Positive"
-                    elif engagement >= 10:
-                        sentiment = "Neutral"
-                    else:
-                        sentiment = "Neutral"
+                # Use sentiment if available, otherwise use neutral as default
+                sentiment = post.sentiment_label.title() if post.sentiment_label else "Neutral"
                 
                 recent_posts.append({
                     'id': str(post.id),

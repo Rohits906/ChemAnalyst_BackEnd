@@ -69,9 +69,10 @@ def fetch_platform_data(platform):
         
         # Fetch and create posts
         posts_data = service.fetch_posts(limit=15)
+        sentiment_posts = []
         if posts_data:
             for post_data in posts_data:
-                ChannelPost.objects.update_or_create(
+                post_obj, created = ChannelPost.objects.update_or_create(
                     platform=platform,
                     platform_post_id=post_data.get("platform_post_id"),
                     defaults={
@@ -91,6 +92,26 @@ def fetch_platform_data(platform):
                         }
                     }
                 )
+                # Prepare for sentiment analysis if newly created or no sentiment
+                if created or not post_obj.sentiment_label:
+                    sentiment_posts.append({
+                        "id": str(post_obj.id),
+                        "post_id": post_obj.platform_post_id,
+                        "post_title": post_obj.title,
+                        "post_text": post_obj.content,
+                        "post_url": post_obj.post_url,
+                        "platform": platform.name,
+                        "author": platform.channel_name,
+                        "published_at": post_obj.published_at.isoformat(),
+                    })
+        
+        # Queue for sentiment analysis
+        if sentiment_posts:
+            try:
+                from sentiment.producers import add_to_sentiment_quene
+                add_to_sentiment_quene(sentiment_posts, keyword=platform.channel_name)
+            except Exception as qex:
+                logger.warning(f"Failed to queue sentiment analysis: {qex}")
         
         return True, f"Platform data fetched successfully from {platform.name}"
         
@@ -295,6 +316,124 @@ class PlatformDashboardView(APIView):
             "data": response_data
         })
 
+class OAuthInitiateView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, platform):
+        platform = platform.lower()
+        supported = ["facebook", "instagram", "twitter", "linkedin"]
+        if platform not in supported:
+            return Response({"error": "Unsupported platform"}, status=status.HTTP_400_BAD_REQUEST)
+
+        # build a callback URI using Django reverse
+        from django.urls import reverse
+        redirect_uri = request.build_absolute_uri(reverse('platform-oauth-callback', args=[platform]))
+
+        # grab the raw JWT access token so that we can round-trip it via state
+        auth_header = request.META.get('HTTP_AUTHORIZATION', '')
+        token_value = None
+        if auth_header.startswith('Bearer '):
+            token_value = auth_header.split(' ', 1)[1]
+
+        auth_url = None
+        state_param = ''
+        if token_value:
+            from urllib.parse import urlencode
+            state_param = urlencode({'token': token_value})
+
+        if platform == "facebook":
+            client_id = settings.FACEBOOK_APP_ID
+            auth_url = (
+                f"https://www.facebook.com/v13.0/dialog/oauth?client_id={client_id}"
+                f"&redirect_uri={redirect_uri}&scope=pages_show_list,instagram_basic"
+            )
+        elif platform == "instagram":
+            client_id = settings.INSTAGRAM_CLIENT_ID
+            auth_url = (
+                f"https://api.instagram.com/oauth/authorize?client_id={client_id}"
+                f"&redirect_uri={redirect_uri}&scope=user_profile,user_media&response_type=code"
+            )
+        elif platform == "twitter":
+            auth_url = "https://api.twitter.com/oauth/authenticate?oauth_token=REQUEST_TOKEN"
+        elif platform == "linkedin":
+            client_id = settings.LINKEDIN_CLIENT_ID
+            auth_url = (
+                f"https://www.linkedin.com/oauth/v2/authorization?response_type=code"
+                f"&client_id={client_id}&redirect_uri={redirect_uri}"
+                f"&scope=r_liteprofile%20r_emailaddress%20w_member_social"
+            )
+
+        if auth_url and state_param:
+            # append state to preserve token
+            sep = '&' if '?' in auth_url else '?'
+            auth_url = f"{auth_url}{sep}state={state_param}"
+
+        return Response({"auth_url": auth_url})
+
+
+class OAuthCallbackView(APIView):
+    permission_classes = []  # handled manually below
+
+    def get(self, request, platform):
+        platform = platform.lower()
+        code = request.GET.get('code') or request.GET.get('oauth_token')
+        error = request.GET.get('error')
+        frontend = settings.FRONTEND_URL.rstrip('/')
+
+        # attempt to recover user from state token
+        user = None
+        state = request.GET.get('state')
+        if state:
+            from urllib.parse import parse_qs
+            qs = parse_qs(state)
+            token_list = qs.get('token')
+            if token_list:
+                raw_token = token_list[0]
+                try:
+                    from rest_framework_simplejwt.tokens import AccessToken
+                    access = AccessToken(raw_token)
+                    from django.contrib.auth import get_user_model
+                    User = get_user_model()
+                    user = User.objects.filter(id=access['user_id']).first()
+                except Exception:
+                    user = None
+
+        if error or not code or not user:
+            # redirect back to frontend with error indicator
+            from django.http import HttpResponseRedirect
+            redirect_url = f"{frontend}/dashboard/platforms?oauth_error=1&platform={platform}"
+            return HttpResponseRedirect(redirect_url)
+
+        # stub: create a dummy channel id using platform name + user id
+        channel_id = f"{platform}_{user.id}"
+        obj, created = Platform.objects.get_or_create(
+            user=user,
+            name=platform,
+            channel_id=channel_id,
+            defaults={
+                'channel_url': '',
+                'channel_name': channel_id,
+                'metadata': {'oauth_code': code}
+            }
+        )
+        if not created:
+            obj.metadata['oauth_code'] = code
+            obj.is_active = True
+            obj.save()
+
+        # kick off a fetch for the new platform so the dashboard is populated quickly
+        try:
+            fetch_success, msg = fetch_platform_data(obj)
+            if not fetch_success:
+                queue_platform_fetch(obj.id, 'initial')
+        except Exception:
+            queue_platform_fetch(obj.id, 'initial')
+
+        from django.http import HttpResponseRedirect
+        # send user to the platforms dashboard (adjust path depending on frontend routing)
+        redirect_url = f"{frontend}/(dashboard)/platforms?oauth_success=1&platform={platform}"
+        return HttpResponseRedirect(redirect_url)
+
 
 class PlatformRefreshView(APIView):
     """Trigger refresh for all platforms or specific one"""
@@ -386,7 +525,9 @@ class PlatformChannelDataView(APIView):
         recent_posts_serializer = ChannelRecentPostsSerializer()
         top_posts_serializer = ChannelTopPostsSerializer()
         
+        # include platform id so front end can trigger sentiment analysis easily
         response_data = {
+            'platformId': str(platform.id),
             'stats': stats_serializer.to_representation(channel_data),
             'barData': bar_serializer.to_representation(channel_data),
             'channelInfo': channel_info_serializer.to_representation(platform),
@@ -423,10 +564,8 @@ class SentimentSearchTriggerView(APIView):
             user=request.user
         )
         
-        # Get posts without sentiment
-        posts = platform.posts.filter(
-            sentiment_label__isnull=True
-        )[:50]
+        # Get posts without sentiment (blank string). field is blankable, not nullable.
+        posts = platform.posts.filter(sentiment_label="")[:50]
         
         if not posts.exists():
             return Response({
