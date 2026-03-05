@@ -3,9 +3,11 @@ from django.conf import settings
 from django.http import JsonResponse
 from django.db.models import Count, Q
 from django.views.decorators.http import require_GET
+from django.utils import timezone
 from rest_framework.views import APIView
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
+from datetime import datetime, timedelta
 from .models import SentimentPost, User_Keyword, Sentiment
 from .serializers import UserKeywordSerializer, UserSentimentSerializer
 from .producers import add_to_sentiment_quene
@@ -17,6 +19,7 @@ class SentimentDashboardView(APIView):
     def get(self, request):
         keyword = request.query_params.get("keyword")
         platform = request.query_params.get("platform")
+        hours = request.query_params.get("hours")
 
         # Get current user's keywords
         user_keywords = User_Keyword.objects.filter(user=request.user).values_list("keyword", flat=True)
@@ -39,6 +42,14 @@ class SentimentDashboardView(APIView):
         
         if platform:
             sentiments = sentiments.filter(post__platform__iexact=platform)
+
+        if hours:
+            try:
+                hours_int = int(hours)
+                time_threshold = timezone.now() - timedelta(hours=hours_int)
+                sentiments = sentiments.filter(post__published_at__gte=time_threshold)
+            except ValueError:
+                pass
 
         # BAR CHART DATA (Platform-wise)
         # We need to count positive/negative per platform
@@ -156,7 +167,7 @@ class SocialMediaSearchView(APIView):
             print("error occured", e)
             return []
 
-    def _fetch_youtube(self, keyword):
+    def _fetch_youtube(self, keyword, hours=None):
         if not settings.YOUTUBE_API_KEY:
             return []
         url = "https://www.googleapis.com/youtube/v3/search"
@@ -165,8 +176,18 @@ class SocialMediaSearchView(APIView):
             "q": keyword,
             "type": "video",
             "key": settings.YOUTUBE_API_KEY,
-            "maxResults": 5,
+            "maxResults": 15, # Increased max results
         }
+        
+        if hours:
+            try:
+                hours_int = int(hours)
+                # YouTube API expects RFC 3339 formatted date-time with Z or offset
+                time_threshold = timezone.now() - timedelta(hours=hours_int)
+                params["publishedAfter"] = time_threshold.isoformat().replace("+00:00", "Z")
+            except ValueError:
+                pass
+
         try:
             response = requests.get(url, params=params)
             data = response.json()
@@ -193,7 +214,7 @@ class SocialMediaSearchView(APIView):
             print("error occured", e)
             return []
 
-    def _fetch_twitter(self, keyword):
+    def _fetch_twitter(self, keyword, hours=None):
         if not settings.TWITTER_BEARER_TOKEN:
             return []
         url = "https://api.twitter.com/2/tweets/search/recent"
@@ -204,8 +225,17 @@ class SocialMediaSearchView(APIView):
             "tweet.fields": "created_at,text,author_id",
             "expansions": "author_id",
             "user.fields": "username,name",
-            "max_results": 15,
+            "max_results": 20, # Increased max results
         }
+        
+        if hours:
+            try:
+                hours_int = int(hours)
+                time_threshold = timezone.now() - timedelta(hours=hours_int)
+                params["start_time"] = time_threshold.strftime("%Y-%m-%dT%H:%M:%SZ")
+            except ValueError:
+                pass
+
         try:
             response = requests.get(url, headers=headers, params=params)
             data = response.json()
@@ -235,10 +265,10 @@ class SocialMediaSearchView(APIView):
             print("error occured", e)
             return []
 
-    def perform_search(self, keyword):
+    def perform_search(self, keyword, hours=None):
         all_posts = []
         current_idd = 1
-        twitter_raw = self._fetch_twitter(keyword)
+        twitter_raw = self._fetch_twitter(keyword, hours=hours)
         for post in twitter_raw:
             text = post.get("text", "")
             all_posts.append(
@@ -277,7 +307,7 @@ class SocialMediaSearchView(APIView):
             )
             current_idd += 1
 
-        youtube_raw = self._fetch_youtube(keyword)
+        youtube_raw = self._fetch_youtube(keyword, hours=hours)
         for post in youtube_raw:
             all_posts.append(
                 {
@@ -294,20 +324,49 @@ class SocialMediaSearchView(APIView):
             )
             current_idd += 1
         
+        # If hours filter is provided, filter all_posts by published_at
+        if hours:
+            try:
+                hours_int = int(hours)
+                time_threshold = timezone.now() - timedelta(hours=hours_int)
+                filtered_posts = []
+                for post in all_posts:
+                    pub_at = post.get("published_at")
+                    if pub_at:
+                        try:
+                            # Handling ISO 8601 strings commonly returned by APIs
+                            dt = datetime.fromisoformat(pub_at.replace("Z", "+00:00"))
+                            if dt >= time_threshold:
+                                filtered_posts.append(post)
+                        except ValueError:
+                            # Fallback if format is slightly different
+                            filtered_posts.append(post)
+                    else:
+                        filtered_posts.append(post)
+                all_posts = filtered_posts
+            except ValueError:
+                pass
+
         add_to_sentiment_quene(all_posts, keyword=keyword)
         
+        # Re-calculate counts if filtered
+        yt_count = len([p for p in all_posts if p['platform'] == 'youtube'])
+        ig_count = len([p for p in all_posts if p['platform'] == 'instagram'])
+        tw_count = len([p for p in all_posts if p['platform'] == 'twitter'])
+
         return {
-            "youtube": len(youtube_raw),
-            "instagram": len(instagram_raw),
-            "twitter": len(twitter_raw),
+            "youtube": yt_count,
+            "instagram": ig_count,
+            "twitter": tw_count,
         }
 
     def get(self, request):
         keyword = request.query_params.get("keyword")
+        hours = request.query_params.get("hours")
         if not keyword:
             return Response({"error": "Keyword is required"}, status=400)
 
-        counts = self.perform_search(keyword)
+        counts = self.perform_search(keyword, hours=hours)
         return Response(
             {
                 "success": True,
@@ -322,6 +381,7 @@ class UserKeywordSearchTriggerView(SocialMediaSearchView):
 
     def get(self, request):
         user_keywords = User_Keyword.objects.filter(user=request.user).values_list("keyword", flat=True)
+        hours = request.query_params.get("hours")
         
         if not user_keywords:
             return Response({"error": "No keywords found for this user. Please add keywords first."}, status=400)
@@ -334,7 +394,7 @@ class UserKeywordSearchTriggerView(SocialMediaSearchView):
         processed_keywords = []
 
         for kw in user_keywords:
-            counts = self.perform_search(kw)
+            counts = self.perform_search(kw, hours=hours)
             processed_keywords.append(kw)
             for platform in total_counts:
                 total_counts[platform] += counts.get(platform, 0)
@@ -433,6 +493,15 @@ class UserSentimentView(APIView):
         platform_filter = request.query_params.get("platform")
         if platform_filter:
             sentiments = sentiments.filter(post__platform__iexact=platform_filter)
+
+        hours_filter = request.query_params.get("hours")
+        if hours_filter:
+            try:
+                hours_int = int(hours_filter)
+                time_threshold = timezone.now() - timedelta(hours=hours_int)
+                sentiments = sentiments.filter(post__published_at__gte=time_threshold)
+            except ValueError:
+                pass
 
         try:
             page = max(int(request.query_params.get("page", 1)), 1)

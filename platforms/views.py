@@ -20,104 +20,12 @@ from .serializers import (
     SubscriberGrowthSerializer, ChannelsListSerializer
 )
 from .producers import queue_platform_fetch, queue_batch_platform_fetch
-from .youtube_service import fetch_youtube_channel_data
-from .platform_services import PlatformServiceFactory
+from .services import fetch_platform_data
 
 logger = logging.getLogger(__name__)
 
 
-def fetch_platform_data(platform):
-    """
-    Fetch platform data using appropriate service based on platform type.
-    Creates ChannelStats and ChannelPost records.
-    Returns: (success: bool, message: str)
-    """
-    try:
-        # For YouTube, continue using existing fetch function for backward compatibility
-        if platform.name == "youtube":
-            result = fetch_youtube_channel_data(platform)
-            return bool(result), "YouTube data fetched successfully"
-        
-        # Use PlatformServiceFactory for other platforms
-        service = PlatformServiceFactory.get_service(platform)
-        if not service:
-            return False, f"No service implementation for platform: {platform.name}"
-        
-        # Fetch channel info
-        channel_info = service.fetch_channel_info()
-        if not channel_info:
-            return False, "Failed to fetch channel information"
-        
-        # Update platform with channel information
-        platform.channel_name = channel_info.get("channel_name", platform.channel_id)
-        platform.profile_picture = channel_info.get("profile_picture", "")
-        platform.metadata = channel_info
-        platform.save()
-        
-        # Create or update ChannelStats
-        stats, created = ChannelStats.objects.update_or_create(
-            platform=platform,
-            defaults={
-                "subscribers": channel_info.get("followers", 0),
-                "views": channel_info.get("total_views", 0),
-                "posts_count": channel_info.get("posts_count", 0),
-                "engagement_rate": 0.0,
-                "last_updated": timezone.now(),
-                "metadata": channel_info
-            }
-        )
-        
-        # Fetch and create posts
-        posts_data = service.fetch_posts(limit=15)
-        sentiment_posts = []
-        if posts_data:
-            for post_data in posts_data:
-                post_obj, created = ChannelPost.objects.update_or_create(
-                    platform=platform,
-                    platform_post_id=post_data.get("platform_post_id"),
-                    defaults={
-                        "title": post_data.get("title", ""),
-                        "content": post_data.get("content", ""),
-                        "post_url": post_data.get("post_url", ""),
-                        "media_urls": post_data.get("media_urls", []),
-                        "media_type": post_data.get("media_type", ""),
-                        "likes": post_data.get("likes", 0),
-                        "comments": post_data.get("comments", 0),
-                        "shares": post_data.get("shares", 0),
-                        "views": post_data.get("views", 0),
-                        "published_at": post_data.get("published_at"),
-                        "metadata": {
-                            "engagement": post_data.get("likes", 0) + post_data.get("comments", 0),
-                            "reach": post_data.get("views", 0)
-                        }
-                    }
-                )
-                # Prepare for sentiment analysis if newly created or no sentiment
-                if created or not post_obj.sentiment_label:
-                    sentiment_posts.append({
-                        "id": str(post_obj.id),
-                        "post_id": post_obj.platform_post_id,
-                        "post_title": post_obj.title,
-                        "post_text": post_obj.content,
-                        "post_url": post_obj.post_url,
-                        "platform": platform.name,
-                        "author": platform.channel_name,
-                        "published_at": post_obj.published_at.isoformat(),
-                    })
-        
-        # Queue for sentiment analysis
-        if sentiment_posts:
-            try:
-                from sentiment.producers import add_to_sentiment_quene
-                add_to_sentiment_quene(sentiment_posts, keyword=platform.channel_name)
-            except Exception as qex:
-                logger.warning(f"Failed to queue sentiment analysis: {qex}")
-        
-        return True, f"Platform data fetched successfully from {platform.name}"
-        
-    except Exception as e:
-        logger.error(f"Error fetching data for {platform.name} - {platform.channel_id}: {str(e)}", exc_info=True)
-        return False, f"Data fetch failed: {str(e)}"
+# Removed fetch_platform_data local definition
 
 
 
@@ -147,25 +55,21 @@ class PlatformCreateView(APIView):
                     "fetch_success": False
                 }, status=status.HTTP_200_OK)
             else:
-                # Reactivate and fetch data
+                # Reactivate and queue background fetch
                 existing.is_active = True
                 existing.save()
                 
-                # Fetch data using the generalized method
-                fetch_success, message = fetch_platform_data(existing)
-                
-                if not fetch_success:
-                    # queue retry when reactivating as well
-                    try:
-                        queue_platform_fetch(existing.id, "reactivate")
-                        message += "; fetch queued in background."
-                    except Exception as qex:
-                        logger.warning(f"Failed to queue background fetch for platform {existing.id}: {qex}")
+                try:
+                    queue_platform_fetch(existing.id, "reactivate")
+                    message = "Platform reactivated; fetch queued in background."
+                except Exception as qex:
+                    logger.warning(f"Failed to queue background fetch for platform {existing.id}: {qex}")
+                    message = "Platform reactivated but failed to queue fetch."
                 
                 return Response({
-                    "message": message if fetch_success else f"Platform reactivated but: {message}",
+                    "message": message,
                     "data": PlatformSerializer(existing).data,
-                    "fetch_success": fetch_success
+                    "fetch_success": True
                 })
         
         # Create new platform
@@ -178,22 +82,18 @@ class PlatformCreateView(APIView):
             metadata={}
         )
         
-        # Fetch data using the generalized method
-        fetch_success, message = fetch_platform_data(platform)
-        
-        if not fetch_success:
-            # Try to queue background fetch for retry
-            try:
-                queue_platform_fetch(platform.id, "initial")
-                message += "; fetch queued for background processing."
-            except Exception as qex:
-                logger.warning(f"Failed to queue background fetch for platform {platform.id}: {qex}")
+        # Queue background fetch
+        try:
+            queue_platform_fetch(platform.id, "initial")
+            message = "Platform added; fetch queued for background processing."
+        except Exception as qex:
+            logger.warning(f"Failed to queue background fetch for platform {platform.id}: {qex}")
+            message = "Platform added but failed to queue background fetch."
         
         return Response({
-            "message": ("Platform added successfully and data fetched!" if fetch_success 
-                       else f"Platform added. {message}"),
+            "message": message,
             "data": PlatformSerializer(platform).data,
-            "fetch_success": fetch_success
+            "fetch_success": True
         }, status=status.HTTP_201_CREATED)
 
 
@@ -421,13 +321,127 @@ class OAuthCallbackView(APIView):
             obj.is_active = True
             obj.save()
 
-        # kick off a fetch for the new platform so the dashboard is populated quickly
+        # kick off a fetch for the new platform via Kafka
         try:
-            fetch_success, msg = fetch_platform_data(obj)
-            if not fetch_success:
-                queue_platform_fetch(obj.id, 'initial')
-        except Exception:
             queue_platform_fetch(obj.id, 'initial')
+        except Exception as qex:
+            logger.warning(f"OAuth: Failed to queue background fetch: {qex}")
+
+        from django.http import HttpResponseRedirect
+        # send user to the platforms dashboard (adjust path depending on frontend routing)
+        redirect_url = f"{frontend}/(dashboard)/platforms?oauth_success=1&platform={platform}"
+        return HttpResponseRedirect(redirect_url)
+
+class OAuthInitiateView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, platform):
+        platform = platform.lower()
+        supported = ["facebook", "instagram", "twitter", "linkedin"]
+        if platform not in supported:
+            return Response({"error": "Unsupported platform"}, status=status.HTTP_400_BAD_REQUEST)
+
+        # build a callback URI using Django reverse
+        from django.urls import reverse
+        redirect_uri = request.build_absolute_uri(reverse('platform-oauth-callback', args=[platform]))
+
+        # grab the raw JWT access token so that we can round-trip it via state
+        auth_header = request.META.get('HTTP_AUTHORIZATION', '')
+        token_value = None
+        if auth_header.startswith('Bearer '):
+            token_value = auth_header.split(' ', 1)[1]
+
+        auth_url = None
+        state_param = ''
+        if token_value:
+            from urllib.parse import urlencode
+            state_param = urlencode({'token': token_value})
+
+        if platform == "facebook":
+            client_id = settings.FACEBOOK_APP_ID
+            auth_url = (
+                f"https://www.facebook.com/v13.0/dialog/oauth?client_id={client_id}"
+                f"&redirect_uri={redirect_uri}&scope=pages_show_list,instagram_basic"
+            )
+        elif platform == "instagram":
+            client_id = settings.INSTAGRAM_CLIENT_ID
+            auth_url = (
+                f"https://api.instagram.com/oauth/authorize?client_id={client_id}"
+                f"&redirect_uri={redirect_uri}&scope=user_profile,user_media&response_type=code"
+            )
+        elif platform == "twitter":
+            auth_url = "https://api.twitter.com/oauth/authenticate?oauth_token=REQUEST_TOKEN"
+        elif platform == "linkedin":
+            client_id = settings.LINKEDIN_CLIENT_ID
+            auth_url = (
+                f"https://www.linkedin.com/oauth/v2/authorization?response_type=code"
+                f"&client_id={client_id}&redirect_uri={redirect_uri}"
+                f"&scope=r_liteprofile%20r_emailaddress%20w_member_social"
+            )
+
+        if auth_url and state_param:
+            # append state to preserve token
+            sep = '&' if '?' in auth_url else '?'
+            auth_url = f"{auth_url}{sep}state={state_param}"
+
+        return Response({"auth_url": auth_url})
+
+
+class OAuthCallbackView(APIView):
+    permission_classes = []  # handled manually below
+
+    def get(self, request, platform):
+        platform = platform.lower()
+        code = request.GET.get('code') or request.GET.get('oauth_token')
+        error = request.GET.get('error')
+        frontend = settings.FRONTEND_URL.rstrip('/')
+
+        # attempt to recover user from state token
+        user = None
+        state = request.GET.get('state')
+        if state:
+            from urllib.parse import parse_qs
+            qs = parse_qs(state)
+            token_list = qs.get('token')
+            if token_list:
+                raw_token = token_list[0]
+                try:
+                    from rest_framework_simplejwt.tokens import AccessToken
+                    access = AccessToken(raw_token)
+                    from django.contrib.auth import get_user_model
+                    User = get_user_model()
+                    user = User.objects.filter(id=access['user_id']).first()
+                except Exception:
+                    user = None
+
+        if error or not code or not user:
+            # redirect back to frontend with error indicator
+            from django.http import HttpResponseRedirect
+            redirect_url = f"{frontend}/dashboard/platforms?oauth_error=1&platform={platform}"
+            return HttpResponseRedirect(redirect_url)
+
+        # stub: create a dummy channel id using platform name + user id
+        channel_id = f"{platform}_{user.id}"
+        obj, created = Platform.objects.get_or_create(
+            user=user,
+            name=platform,
+            channel_id=channel_id,
+            defaults={
+                'channel_url': '',
+                'channel_name': channel_id,
+                'metadata': {'oauth_code': code}
+            }
+        )
+        if not created:
+            obj.metadata['oauth_code'] = code
+            obj.is_active = True
+            obj.save()
+
+        # kick off a fetch for the new platform via Kafka
+        try:
+            queue_platform_fetch(obj.id, 'initial')
+        except Exception as qex:
+            logger.warning(f"OAuth: Failed to queue background fetch: {qex}")
 
         from django.http import HttpResponseRedirect
         # send user to the platforms dashboard (adjust path depending on frontend routing)

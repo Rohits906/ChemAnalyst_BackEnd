@@ -37,10 +37,18 @@ def analyze_sentiment(text):
         "confidence_score": confidence,
     }
 
+def safe_json_deserializer(x):
+    if not x:
+        return {}
+    try:
+        return json.loads(x.decode("utf-8"))
+    except json.JSONDecodeError:
+        return {}
+
 sentiment_consumer = KafkaConsumer(
     settings.KAFKA_SENTIMENT_TOPIC,
     bootstrap_servers=settings.KAFKA_BOOTSTRAP_SERVERS,
-    value_deserializer=lambda x: json.loads(x.decode("utf-8")),
+    value_deserializer=safe_json_deserializer,
     group_id="sentiment-group",
     auto_offset_reset="latest",
 )
@@ -87,12 +95,14 @@ for msg in sentiment_consumer:
 
         analysis = analyze_sentiment(post_text)
 
-        Sentiment.objects.create(
+        Sentiment.objects.update_or_create(
             post=post_obj,
             keyword=data.get("keyword") or "N/A",
-            sentiment_label=analysis["sentiment"],
-            confidence_score=analysis["confidence_score"],
-            model_used=MODEL_NAME
+            defaults={
+                "sentiment_label": analysis["sentiment"],
+                "confidence_score": analysis["confidence_score"],
+                "model_used": MODEL_NAME
+            }
         )
 
         # Update ChannelPost sentiment if it exists
