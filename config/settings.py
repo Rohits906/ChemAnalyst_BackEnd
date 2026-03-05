@@ -27,6 +27,7 @@ INSTALLED_APPS = [
     "contact",
     "platforms",
     "sentiment",
+    "reports",
 ]
 # AUTH_USER_MODEL = "authentication.User"
 
@@ -107,10 +108,24 @@ INSTAGRAM_BUSINESS_ACCOUNT_ID = config("INSTAGRAM_BUSINESS_ACCOUNT_ID", default=
 YOUTUBE_API_KEY = config("YOUTUBE_API_KEY", default="")
 TWITTER_BEARER_TOKEN = config("TWITTER_BEARER_TOKEN", default="")
 
+# frontend url used by OAuth callbacks
+FRONTEND_URL = config("FRONTEND_URL", default="http://localhost:3000")
+
+# OAuth / API credentials for other platforms
+FACEBOOK_APP_ID = config("FACEBOOK_APP_ID", default="")
+FACEBOOK_APP_SECRET = config("FACEBOOK_APP_SECRET", default="")
+INSTAGRAM_CLIENT_ID = config("INSTAGRAM_CLIENT_ID", default="")
+INSTAGRAM_CLIENT_SECRET = config("INSTAGRAM_CLIENT_SECRET", default="")
+TWITTER_API_KEY = config("TWITTER_API_KEY", default="")
+TWITTER_API_SECRET = config("TWITTER_API_SECRET", default="")
+LINKEDIN_CLIENT_ID = config("LINKEDIN_CLIENT_ID", default="")
+LINKEDIN_CLIENT_SECRET = config("LINKEDIN_CLIENT_SECRET", default="")
+
 
 # KAFKA CONFIG
 KAFKA_BOOTSTRAP_SERVERS = config("KAFKA_BOOTSTRAP_SERVERS", default="localhost:9092")
-KAFKA_SENTIMENT_TOPIC = "sentiment_queue"
+KAFKA_PLATFORM_FETCH_TOPIC = 'platform-fetch-tasks'
+KAFKA_SENTIMENT_TOPIC = "sentiment_quene"
 
 SIMPLE_JWT = {
     "ACCESS_TOKEN_LIFETIME": timedelta(days=10),
