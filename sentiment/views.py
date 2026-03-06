@@ -453,8 +453,8 @@ class SocialMediaSearchView(APIView):
             "lucknow": (26.8467, 80.9462),
             "noida": (28.5355, 77.3910),
             "gurgaon": (28.4595, 77.0266),
-            "india": (22.0, 78.0), # Centered slightly differently to avoid "Nagpur" specific look
-            "भारत": (22.0, 78.0),
+            "india": (28.61, 77.20), # Use Delhi as the national pin for better UX
+            "भारत": (28.61, 77.20),
 
             # World Countries
             "israel": (31.0461, 34.8516),
