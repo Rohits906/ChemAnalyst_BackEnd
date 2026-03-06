@@ -418,16 +418,19 @@ class SocialMediaSearchView(APIView):
         # 3. Fallback to city-based heuristic
         cities = self._get_cities()
         
-        # Check if keyword contains or is a city
+        # Priority check: look for specific cities FIRST, even if country is mentioned
         for city, coords in cities.items():
-            if city in keyword_clean:
-                return city.title(), coords[0], coords[1]
-            
-        # Check if city is mentioned in text
-        for city, coords in cities.items():
-            if city in text_lower:
+            if city in text_lower or (keyword_clean and city in keyword_clean):
+                # If city is india or bharat, only return if no specific city is found later
+                if city in ["india", "भारत"]:
+                    continue
                 return city.title(), coords[0], coords[1]
         
+        # Check if keyword contains or is a country (only if no specific city found)
+        if "india" in keyword_clean or "भारत" in keyword_clean:
+            coords = cities.get("india")
+            return "India", coords[0], coords[1]
+
         # 4. Final fallback: Return empty if no real location identified
         return "", None, None
 
@@ -450,8 +453,8 @@ class SocialMediaSearchView(APIView):
             "lucknow": (26.8467, 80.9462),
             "noida": (28.5355, 77.3910),
             "gurgaon": (28.4595, 77.0266),
-            "india": (20.5937, 78.9629),
-            "भारत": (20.5937, 78.9629),
+            "india": (22.0, 78.0), # Centered slightly differently to avoid "Nagpur" specific look
+            "भारत": (22.0, 78.0),
 
             # World Countries
             "israel": (31.0461, 34.8516),
