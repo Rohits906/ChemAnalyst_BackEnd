@@ -108,8 +108,8 @@ def fetch_platform_data(platform):
         # Queue for sentiment analysis
         if sentiment_posts:
             try:
-                from sentiment.producers import add_to_sentiment_quene
-                add_to_sentiment_quene(sentiment_posts, keyword=platform.channel_name)
+                from sentiment.producers import add_to_sentiment_queue
+                add_to_sentiment_queue(sentiment_posts, keyword=platform.channel_name)
             except Exception as qex:
                 logger.warning(f"Failed to queue sentiment analysis: {qex}")
         
@@ -587,8 +587,8 @@ class SentimentSearchTriggerView(APIView):
             })
         
         # Queue for sentiment analysis (using your existing Kafka producer)
-        from .producers import add_to_sentiment_quene
-        add_to_sentiment_quene(posts_data, keyword=platform.channel_name)
+        from sentiment.producers import add_to_sentiment_queue
+        add_to_sentiment_queue(posts_data, keyword=platform.channel_name)
         
         return Response({
             "message": f"Sentiment analysis triggered for {posts.count()} posts"
