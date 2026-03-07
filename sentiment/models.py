@@ -89,6 +89,7 @@ class Sentiment(models.Model):
     analyzed_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
+        unique_together = ("post", "keyword")
         indexes = [
             models.Index(fields=["sentiment_label"]),
             models.Index(fields=["analyzed_at"]),
