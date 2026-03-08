@@ -62,10 +62,13 @@ class Post(models.Model):
     comments = models.IntegerField(default=0)
     shares = models.IntegerField(default=0)
     raw_json = models.JSONField(default=dict)
+
+    # Location fields
     latitude = models.FloatField(null=True, blank=True)
     longitude = models.FloatField(null=True, blank=True)
     location_name = models.CharField(max_length=255, null=True, blank=True, default="")
     location_type = models.CharField(max_length=50, default="city")  # country, state, or city
+
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

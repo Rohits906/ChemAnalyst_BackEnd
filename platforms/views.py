@@ -601,8 +601,8 @@ class SentimentSearchTriggerView(APIView):
             })
         
         # Queue for sentiment analysis (using your existing Kafka producer)
-        from sentiment.producers import add_to_sentiment_queue
-        add_to_sentiment_queue(posts_data, keyword=platform.channel_name)
+        from sentiment.producers import add_to_sentiment_quene
+        add_to_sentiment_quene(posts_data, keyword=platform.channel_name)
         
         return Response({
             "message": f"Sentiment analysis triggered for {posts.count()} posts"
