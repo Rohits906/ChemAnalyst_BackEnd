@@ -79,7 +79,7 @@ class LoginView(TokenObtainPairView):
                         "success": True,
                         "data": {
                             "two_factor_required": True,
-                            "is_setup": not account.two_factor_enabled and enable_2fa_request,
+                            "is_setup": enable_2fa_request and not account.two_factor_enabled,
                             "user_id": user.id,
                             "message": "A verification code has been sent to your email."
                         }
@@ -130,7 +130,17 @@ class SignupView(APIView):
         if serializer.is_valid():
             user = serializer.save()
             # Create Account for the new user
-            Account.objects.get_or_create(account_owner=user, defaults={'name': user.username})
+            account, created = Account.objects.get_or_create(account_owner=user, defaults={'name': user.username})
+            
+            # Assign Admin role to the account owner
+            # Look for the system 'Admin' template role
+            admin_role = Role.objects.filter(role_name='Admin', is_system_role=True).first()
+            if admin_role:
+                AccountMember.objects.get_or_create(
+                    account=account,
+                    user=user,
+                    defaults={'role': admin_role, 'is_accepted': True}
+                )
             
             refresh = RefreshToken.for_user(user)
             access_token = str(refresh.access_token)
@@ -187,11 +197,21 @@ class VerifyAuth(APIView):
 
     def get(self, request):
         user = request.user
+        
+        # Get role and permissions
+        membership = AccountMember.objects.filter(user=user).select_related('role').first()
+        role_name = membership.role.role_name if membership else None
+        permissions = []
+        if membership and membership.role:
+            permissions = list(membership.role.permissions.values_list('permission_id', flat=True))
+        
         user_data = {
             "email": user.email,
             "first_name": user.first_name,
             "last_name": user.last_name,
             "username": user.username,
+            "role": role_name,
+            "permissions": permissions
         }
         return Response(
             {"success": True, "message": "User Authenticated", "data": user_data}, 200
@@ -376,11 +396,20 @@ class LoginVerify2FAView(APIView):
                 account.otp_code = None # Clear after use
                 account.save()
 
+                # Get role and permissions
+                membership = AccountMember.objects.filter(user=user).select_related('role').first()
+                role_name = membership.role.role_name if membership else None
+                permissions = []
+                if membership and membership.role:
+                    permissions = list(membership.role.permissions.values_list('permission_id', flat=True))
+
                 user_data = {
                     "email": user.email,
                     "first_name": user.first_name,
                     "last_name": user.last_name,
                     "username": user.username,
+                    "role": role_name,
+                    "permissions": permissions
                 }
                 
                 response = Response({

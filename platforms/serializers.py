@@ -347,7 +347,8 @@ class ChannelsListSerializer(serializers.Serializer):
         channels = []
         for platform in platforms:
             # Get latest stats record (contains correct video/post counts from YouTube API)
-            latest_stats = platform.stats.first()
+            stats_list = list(platform.stats.all())
+            latest_stats = stats_list[0] if stats_list else None
             
             # derive display label including platform name
             display_label = f"{platform.name.title()} - {platform.channel_name}"
