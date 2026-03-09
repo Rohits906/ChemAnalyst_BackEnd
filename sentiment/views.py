@@ -11,6 +11,21 @@ from datetime import datetime, timedelta
 from .models import SentimentPost, User_Keyword, Sentiment
 from .serializers import UserKeywordSerializer, UserSentimentSerializer
 from .producers import add_to_sentiment_quene
+import random
+
+# Predefined locations for heuristic tagging when source API lacks geo data
+HEURISTIC_LOCATIONS = [
+    {"name": "Lucknow", "lat": 26.8467, "lng": 80.9462, "type": "city"},
+    {"name": "Mumbai", "lat": 19.0760, "lng": 72.8777, "type": "city"},
+    {"name": "Delhi", "lat": 28.6139, "lng": 77.2090, "type": "city"},
+    {"name": "New York", "lat": 40.7128, "lng": -74.0060, "type": "city"},
+    {"name": "London", "lat": 51.5074, "lng": -0.1278, "type": "city"},
+    {"name": "Paris", "lat": 48.8566, "lng": 2.3522, "type": "city"},
+    {"name": "Tokyo", "lat": 35.6895, "lng": 139.6917, "type": "city"},
+    {"name": "Sydney", "lat": -33.8688, "lng": 151.2093, "type": "city"},
+    {"name": "Dubai", "lat": 25.2048, "lng": 55.2708, "type": "city"},
+    {"name": "Singapore", "lat": 1.3521, "lng": 103.8198, "type": "city"},
+]
 
 
 class SentimentDashboardView(APIView):
@@ -176,7 +191,7 @@ class SocialMediaSearchView(APIView):
             "q": keyword,
             "type": "video",
             "key": settings.YOUTUBE_API_KEY,
-            "maxResults": 15, # Increased max results
+            "maxResults": 50, # Increased max results for more data
         }
         
         if hours:
@@ -281,6 +296,10 @@ class SocialMediaSearchView(APIView):
                     "platform": "twitter",
                     "author": post.get("author", ""),
                     "published_at": post.get("created_at"),
+                    "latitude": None,
+                    "longitude": None,
+                    "location_name": "",
+                    "location_type": "",
                     "extra_details": {},
                 }
             )
@@ -299,6 +318,10 @@ class SocialMediaSearchView(APIView):
                     "platform": "instagram",
                     "author": post.get("username", ""), 
                     "published_at": post.get("timestamp"),
+                    "latitude": None,
+                    "longitude": None,
+                    "location_name": "",
+                    "location_type": "",
                     "extra_details": {
                         "media_type": post.get("media_type"),
                         "media_url": post.get("media_url"),
@@ -319,6 +342,10 @@ class SocialMediaSearchView(APIView):
                     "platform": "youtube",
                     "author": post.get("author"),
                     "published_at": post.get("published_at"),
+                    "latitude": None,
+                    "longitude": None,
+                    "location_name": "",
+                    "location_type": "",
                     "extra_details": post.get("extra_details", {}),
                 }
             )
@@ -367,6 +394,10 @@ class SocialMediaSearchView(APIView):
             return Response({"error": "Keyword is required"}, status=400)
 
         counts = self.perform_search(keyword, hours=hours)
+        
+        # Save keyword for the current user to ensure it's tracked and shown in history
+        User_Keyword.objects.get_or_create(user=request.user, keyword=keyword.strip())
+
         return Response(
             {
                 "success": True,
@@ -477,7 +508,6 @@ class UserSentimentView(APIView):
             
         sentiments = (
             Sentiment.objects
-            .filter(keyword__in=user_keywords)
             .select_related("post")
             .order_by("-analyzed_at")
         )
@@ -485,6 +515,9 @@ class UserSentimentView(APIView):
         keyword_filter = request.query_params.get("keyword")
         if keyword_filter:
             sentiments = sentiments.filter(keyword__iexact=keyword_filter)
+        else:
+            # If no specific keyword filter, fall back to user's registered keywords
+            sentiments = sentiments.filter(keyword__in=user_keywords)
 
         sentiment_filter = request.query_params.get("sentiment")
         if sentiment_filter:
@@ -494,6 +527,7 @@ class UserSentimentView(APIView):
         if platform_filter:
             sentiments = sentiments.filter(post__platform__iexact=platform_filter)
 
+        # Optional hours filter — only apply if provided by frontend
         hours_filter = request.query_params.get("hours")
         if hours_filter:
             try:
@@ -502,6 +536,23 @@ class UserSentimentView(APIView):
                 sentiments = sentiments.filter(post__published_at__gte=time_threshold)
             except ValueError:
                 pass
+
+        # Optional location filter — only include posts with real location (defaults to false now)
+        location_only = request.query_params.get("location_only", "false")
+        if location_only.lower() == "true":
+            sentiments = sentiments.filter(
+                Q(post__latitude__isnull=False) | Q(post__location_name__gt="")
+            )
+
+        # Skip pagination if 'all=true' is requested
+        all_data = request.query_params.get("all", "false")
+        if all_data.lower() == "true":
+            serializer = UserSentimentSerializer(sentiments, many=True)
+            return Response({
+                "success": True,
+                "count": sentiments.count(),
+                "results": serializer.data,
+            })
 
         try:
             page = max(int(request.query_params.get("page", 1)), 1)

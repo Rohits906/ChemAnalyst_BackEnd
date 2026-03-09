@@ -85,13 +85,32 @@ for msg in sentiment_consumer:
                 "post_text": post_text,
                 "post_url": post_url,
                 "published_at": published_at,
+                "latitude": data.get("latitude"),
+                "longitude": data.get("longitude"),
+                "location_name": data.get("location_name") or "",
+                "location_type": data.get("location_type") or "",
                 "raw_json": data.get("extra_details") or {}
             }
         )
 
-        if not created and (not post_obj.post_title or post_obj.post_title == "N/A"):
-            post_obj.post_title = post_title
-            post_obj.save()
+        if not created:
+            updated = False
+            if not post_obj.post_title or post_obj.post_title == "N/A":
+                post_obj.post_title = post_title
+                updated = True
+            # Only update location if real data is available from API
+            if post_obj.latitude is None and data.get("latitude") is not None:
+                post_obj.latitude = data.get("latitude")
+                updated = True
+            if post_obj.longitude is None and data.get("longitude") is not None:
+                post_obj.longitude = data.get("longitude")
+                updated = True
+            real_loc = data.get("location_name")
+            if (not post_obj.location_name or post_obj.location_name in ("", "Global")) and real_loc:
+                post_obj.location_name = real_loc
+                updated = True
+            if updated:
+                post_obj.save()
 
         analysis = analyze_sentiment(post_text)
 
