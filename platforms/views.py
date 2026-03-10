@@ -1,6 +1,8 @@
 import requests
 import logging
+import json
 from django.conf import settings
+from django.http import HttpResponseRedirect
 from django.db.models import Count, Q, Sum, Avg
 from django.utils import timezone
 from django.shortcuts import get_object_or_404
@@ -38,7 +40,7 @@ class PlatformCreateView(APIView):
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
         
-        data = serializer.validated_data
+        data: dict = serializer.validated_data  # type: ignore
         
         # Check if platform already exists for this user
         existing = Platform.objects.filter(
@@ -75,10 +77,10 @@ class PlatformCreateView(APIView):
         # Create new platform
         platform = Platform.objects.create(
             user=request.user,
-            name=data['name'],
-            channel_id=data['channel_id'],
-            channel_url=data['channel_url'],
-            channel_name=data['channel_id'],  # Will be updated by fetch
+            name=str(data.get('name', '')),
+            channel_id=str(data.get('channel_id', '')),
+            channel_url=str(data.get('channel_url', '')),
+            channel_name=str(data.get('channel_id', '')),  # Will be updated by fetch
             metadata={}
         )
         
@@ -201,12 +203,13 @@ class PlatformDashboardView(APIView):
             top_by_channel.append({'channel': label, 'list': top_items})
             recent_by_channel.append({'channel': label, 'list': recent_items})
 
+        stats_repr = dashboard_stats_serializer.to_representation(dashboard_data)  # type: ignore
         response_data = {
             'barData': bar_chart_serializer.to_representation(dashboard_data),
             'lineChart': subscriber_growth_serializer.to_representation({
                 'platforms': platforms
             }),
-            'stats': dashboard_stats_serializer.to_representation(dashboard_data).get('stats', []),
+            'stats': stats_repr.get('stats', []) if isinstance(stats_repr, dict) else [],
             'topFive': top_by_channel,
             'recentProfilePosts': recent_by_channel,
         }
@@ -216,237 +219,841 @@ class PlatformDashboardView(APIView):
             "data": response_data
         })
 
-class OAuthInitiateView(APIView):
+class SystemMetaConnectView(APIView):
+    """Connect Meta platforms using pre-configured system credentials (.env)"""
     permission_classes = [IsAuthenticated]
-
-    def get(self, request, platform):
-        platform = platform.lower()
-        supported = ["facebook", "instagram", "twitter", "linkedin"]
-        if platform not in supported:
-            return Response({"error": "Unsupported platform"}, status=status.HTTP_400_BAD_REQUEST)
-
-        # build a callback URI using Django reverse
-        from django.urls import reverse
-        redirect_uri = request.build_absolute_uri(reverse('platform-oauth-callback', args=[platform]))
-
-        # grab the raw JWT access token so that we can round-trip it via state
-        auth_header = request.META.get('HTTP_AUTHORIZATION', '')
-        token_value = None
-        if auth_header.startswith('Bearer '):
-            token_value = auth_header.split(' ', 1)[1]
-
-        auth_url = None
-        state_param = ''
-        if token_value:
-            from urllib.parse import urlencode
-            state_param = urlencode({'token': token_value})
-
-        if platform == "facebook":
-            client_id = settings.FACEBOOK_APP_ID
-            auth_url = (
-                f"https://www.facebook.com/v13.0/dialog/oauth?client_id={client_id}"
-                f"&redirect_uri={redirect_uri}&scope=pages_show_list,instagram_basic"
-            )
-        elif platform == "instagram":
-            client_id = settings.INSTAGRAM_CLIENT_ID
-            auth_url = (
-                f"https://api.instagram.com/oauth/authorize?client_id={client_id}"
-                f"&redirect_uri={redirect_uri}&scope=user_profile,user_media&response_type=code"
-            )
-        elif platform == "twitter":
-            auth_url = "https://api.twitter.com/oauth/authenticate?oauth_token=REQUEST_TOKEN"
-        elif platform == "linkedin":
-            client_id = settings.LINKEDIN_CLIENT_ID
-            auth_url = (
-                f"https://www.linkedin.com/oauth/v2/authorization?response_type=code"
-                f"&client_id={client_id}&redirect_uri={redirect_uri}"
-                f"&scope=r_liteprofile%20r_emailaddress%20w_member_social"
-            )
-
-        if auth_url and state_param:
-            # append state to preserve token
-            sep = '&' if '?' in auth_url else '?'
-            auth_url = f"{auth_url}{sep}state={state_param}"
-
-        return Response({"auth_url": auth_url})
-
-
-class OAuthCallbackView(APIView):
-    permission_classes = []  # handled manually below
-
-    def get(self, request, platform):
-        platform = platform.lower()
-        code = request.GET.get('code') or request.GET.get('oauth_token')
-        error = request.GET.get('error')
-        frontend = settings.FRONTEND_URL.rstrip('/')
-
-        # attempt to recover user from state token
-        user = None
-        state = request.GET.get('state')
-        if state:
-            from urllib.parse import parse_qs
-            qs = parse_qs(state)
-            token_list = qs.get('token')
-            if token_list:
-                raw_token = token_list[0]
-                try:
-                    from rest_framework_simplejwt.tokens import AccessToken
-                    access = AccessToken(raw_token)
-                    from django.contrib.auth import get_user_model
-                    User = get_user_model()
-                    user = User.objects.filter(id=access['user_id']).first()
-                except Exception:
-                    user = None
-
-        if error or not code or not user:
-            # redirect back to frontend with error indicator
-            from django.http import HttpResponseRedirect
-            redirect_url = f"{frontend}/dashboard/platforms?oauth_error=1&platform={platform}"
-            return HttpResponseRedirect(redirect_url)
-
-        # stub: create a dummy channel id using platform name + user id
-        channel_id = f"{platform}_{user.id}"
-        obj, created = Platform.objects.get_or_create(
-            user=user,
-            name=platform,
-            channel_id=channel_id,
-            defaults={
-                'channel_url': '',
-                'channel_name': channel_id,
-                'metadata': {'oauth_code': code}
+    
+    def post(self, request, platform):
+        platform_name = platform.lower()
+        if platform_name not in ["facebook", "instagram"]:
+            return Response({"error": "Only Facebook and Instagram supported for system connect"}, status=status.HTTP_400_BAD_REQUEST)
+            
+        page_id = settings.FACEBOOK_PAGE_ID
+        page_token = settings.FACEBOOK_PAGE_ACCESS_TOKEN
+        
+        if not page_id or not page_token:
+            return Response({
+                "error": "System credentials (FACEBOOK_PAGE_ID/TOKEN) not configured in .env",
+                "configured": False
+            }, status=status.HTTP_400_BAD_REQUEST)
+            
+        # For Instagram, we use the same Page ID and token (we'll look up IG ID in service)
+        # Check if platform already exists
+        existing = Platform.objects.filter(
+            user=request.user,
+            name=platform_name,
+            channel_id=page_id
+        ).first()
+        
+        if existing:
+            return Response({
+                "message": f"{platform_name.capitalize()} already connected via system credentials",
+                "data": PlatformSerializer(existing).data
+            })
+            
+        # Create platform
+        new_platform = Platform.objects.create(
+            user=request.user,
+            name=platform_name,
+            channel_id=page_id,
+            channel_url=f"https://www.facebook.com/{page_id}" if platform_name == "facebook" else "https://www.instagram.com/",
+            channel_name=f"System {platform_name.capitalize()}",
+            metadata={
+                "system_auth": True,
+                "page_id": page_id,
+                "page_access_token": page_token
             }
         )
-        if not created:
-            obj.metadata['oauth_code'] = code
-            obj.is_active = True
-            obj.save()
-
-        # kick off a fetch for the new platform via Kafka
+        
         try:
-            queue_platform_fetch(obj.id, 'initial')
-        except Exception as qex:
-            logger.warning(f"OAuth: Failed to queue background fetch: {qex}")
+            queue_platform_fetch(new_platform.id, "initial")
+            message = f"{platform_name.capitalize()} connected successfully using system credentials."
+        except Exception as e:
+            message = f"{platform_name.capitalize()} connected, but background fetch failed to queue."
+            
+        return Response({
+            "message": message,
+            "data": PlatformSerializer(new_platform).data,
+            "configured": True
+        })
 
-        from django.http import HttpResponseRedirect
-        # send user to the platforms dashboard (adjust path depending on frontend routing)
-        redirect_url = f"{frontend}/(dashboard)/platforms?oauth_success=1&platform={platform}"
-        return HttpResponseRedirect(redirect_url)
+    def get(self, request, platform):
+        """Check if system credentials are configured"""
+        is_configured = bool(settings.FACEBOOK_PAGE_ID and settings.FACEBOOK_PAGE_ACCESS_TOKEN)
+        return Response({
+            "platform": platform,
+            "configured": is_configured
+        })
+
 
 class OAuthInitiateView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, platform):
         platform = platform.lower()
-        supported = ["facebook", "instagram", "twitter", "linkedin"]
+        supported = ["facebook", "instagram"]
         if platform not in supported:
             return Response({"error": "Unsupported platform"}, status=status.HTTP_400_BAD_REQUEST)
 
-        # build a callback URI using Django reverse
+        # Build callback URI
         from django.urls import reverse
-        redirect_uri = request.build_absolute_uri(reverse('platform-oauth-callback', args=[platform]))
-
-        # grab the raw JWT access token so that we can round-trip it via state
+        redirect_uri = request.build_absolute_uri(
+            reverse('platform-oauth-callback', args=[platform])
+        )
+        
+        # Meta prefers localhost over 127.0.0.1
+        if "127.0.0.1" in redirect_uri:
+            redirect_uri = redirect_uri.replace("127.0.0.1", "localhost")
+        
+        # Get JWT token for state parameter
         auth_header = request.META.get('HTTP_AUTHORIZATION', '')
         token_value = None
         if auth_header.startswith('Bearer '):
             token_value = auth_header.split(' ', 1)[1]
-
-        auth_url = None
-        state_param = ''
+        
+        # OAuth scopes based on platform
+        scopes = {
+            'facebook': 'pages_show_list,pages_read_engagement',
+            'instagram': 'pages_show_list,pages_read_engagement'
+        }
+        
+        # Build auth URL
+        auth_url = (
+            f"https://www.facebook.com/{settings.FACEBOOK_API_VERSION}/dialog/oauth"
+            f"?client_id={settings.FACEBOOK_APP_ID}"
+            f"&redirect_uri={redirect_uri}"
+            f"&scope={scopes[platform]}"
+            f"&response_type=code"
+        )
+        
+        # Add state with token
         if token_value:
-            from urllib.parse import urlencode
-            state_param = urlencode({'token': token_value})
-
-        if platform == "facebook":
-            client_id = settings.FACEBOOK_APP_ID
-            auth_url = (
-                f"https://www.facebook.com/v13.0/dialog/oauth?client_id={client_id}"
-                f"&redirect_uri={redirect_uri}&scope=pages_show_list,instagram_basic"
-            )
-        elif platform == "instagram":
-            client_id = settings.INSTAGRAM_CLIENT_ID
-            auth_url = (
-                f"https://api.instagram.com/oauth/authorize?client_id={client_id}"
-                f"&redirect_uri={redirect_uri}&scope=user_profile,user_media&response_type=code"
-            )
-        elif platform == "twitter":
-            auth_url = "https://api.twitter.com/oauth/authenticate?oauth_token=REQUEST_TOKEN"
-        elif platform == "linkedin":
-            client_id = settings.LINKEDIN_CLIENT_ID
-            auth_url = (
-                f"https://www.linkedin.com/oauth/v2/authorization?response_type=code"
-                f"&client_id={client_id}&redirect_uri={redirect_uri}"
-                f"&scope=r_liteprofile%20r_emailaddress%20w_member_social"
-            )
-
-        if auth_url and state_param:
-            # append state to preserve token
-            sep = '&' if '?' in auth_url else '?'
-            auth_url = f"{auth_url}{sep}state={state_param}"
-
-        return Response({"auth_url": auth_url})
+            import urllib.parse
+            state = urllib.parse.quote(json.dumps({'token': token_value}))
+            auth_url += f"&state={state}"
+        
+        return Response({
+            "auth_url": auth_url,
+            "redirect_uri": redirect_uri,
+            "platform": platform
+        })
 
 
 class OAuthCallbackView(APIView):
-    permission_classes = []  # handled manually below
+    permission_classes = []  # No auth required for OAuth callback
 
     def get(self, request, platform):
         platform = platform.lower()
-        code = request.GET.get('code') or request.GET.get('oauth_token')
+        code = request.GET.get('code')
         error = request.GET.get('error')
-        frontend = settings.FRONTEND_URL.rstrip('/')
-
-        # attempt to recover user from state token
-        user = None
+        error_reason = request.GET.get('error_reason')
+        error_description = request.GET.get('error_description')
         state = request.GET.get('state')
-        if state:
-            from urllib.parse import parse_qs
-            qs = parse_qs(state)
-            token_list = qs.get('token')
-            if token_list:
-                raw_token = token_list[0]
-                try:
-                    from rest_framework_simplejwt.tokens import AccessToken
-                    access = AccessToken(raw_token)
-                    from django.contrib.auth import get_user_model
-                    User = get_user_model()
-                    user = User.objects.filter(id=access['user_id']).first()
-                except Exception:
-                    user = None
-
-        if error or not code or not user:
-            # redirect back to frontend with error indicator
-            from django.http import HttpResponseRedirect
-            redirect_url = f"{frontend}/dashboard/platforms?oauth_error=1&platform={platform}"
+        
+        frontend_url = settings.FRONTEND_URL.rstrip('/')
+        
+        # Handle OAuth error
+        if error or not code:
+            logger.error(f"OAuth error for {platform}: {error} - {error_description}")
+            redirect_url = (
+                f"{frontend_url}/platforms"
+                f"?oauth_error=1"
+                f"&platform={platform}"
+                f"&reason={error_reason or 'access_denied'}"
+            )
             return HttpResponseRedirect(redirect_url)
+        
+        # Extract user from state
+        user = self._get_user_from_state(state)
+        if not user:
+            logger.error("Could not authenticate user from OAuth state")
+            redirect_url = f"{frontend_url}/platforms?oauth_error=1&reason=authentication_failed"
+            return HttpResponseRedirect(redirect_url)
+        
+        # Exchange code for tokens
+        try:
+            # Step 1: Exchange code for short-lived token
+            token_data = self._exchange_code_for_token(request, platform, code)
+            if not token_data or 'access_token' not in token_data:
+                raise Exception("Failed to get access token")
+            
+            short_lived_token = token_data['access_token']
+            
+            # Step 2: Exchange for long-lived token
+            long_lived_token = self._get_long_lived_token(short_lived_token)
+            
+            # Step 3: Get page access tokens
+            pages_data = self._get_user_pages(long_lived_token)
+            
+            # Step 4: Create or update platforms
+            platforms_created = self._create_platforms(
+                user=user,
+                platform_type=platform,
+                long_lived_token=long_lived_token,
+                pages_data=pages_data,
+                token_expiry=token_data.get('expires_in', 5184000)  # Default 60 days
+            )
+            
+            # Queue fetch for each platform (async)
+            for platform_obj in platforms_created:
+                try:
+                    queue_platform_fetch(platform_obj.id, 'initial')
+                except Exception as qex:
+                    logger.warning(f"Failed to queue fetch for platform {platform_obj.id}: {qex}")
+            
+            # Also fetch data synchronously so it shows immediately
+            for platform_obj in platforms_created:
+                try:
+                    from .meta_services import FacebookService, InstagramService
+                    from .platform_services import TwitterService
+                    
+                    if platform_obj.name == 'facebook':
+                        print(f"DEBUG OAuthCallbackView - Using FacebookService for {platform_obj.channel_id}")
+                        service = FacebookService(platform_obj)
+                    elif platform_obj.name == 'instagram':
+                        print(f"DEBUG OAuthCallbackView - Using InstagramService for {platform_obj.channel_id}")
+                        service = InstagramService(platform_obj)
+                    elif platform_obj.name == 'twitter':
+                        print(f"DEBUG OAuthCallbackView - Using TwitterService for {platform_obj.channel_id}")
+                        service = TwitterService(platform_obj)
+                    else:
+                        print(f"DEBUG OAuthCallbackView - Unknown platform type: {platform_obj.name}")
+                        continue
+                    
+                    # Fetch channel info
+                    print(f"DEBUG OAuthCallbackView - Fetching channel info...")
+                    channel_info = service.fetch_channel_info()
+                    print(f"DEBUG OAuthCallbackView - Channel info result: {bool(channel_info)}")
+                    
+                    if channel_info:
+                        platform_obj.channel_name = channel_info.get('channel_name', platform_obj.channel_id)
+                        platform_obj.profile_picture = channel_info.get('profile_picture', '')
+                        platform_obj.save()
+                        print(f"DEBUG OAuthCallbackView - Platform updated: {platform_obj.channel_name}")
+                        
+                        # Create stats
+                        from .models import ChannelStats
+                        ChannelStats.objects.create(
+                            platform=platform_obj,
+                            followers=channel_info.get('followers', 0),
+                            posts_count=channel_info.get('posts_count', 0),
+                            impressions=channel_info.get('total_reach', 0),
+                            period_start=timezone.now().replace(hour=0, minute=0, second=0, microsecond=0),
+                            period_end=timezone.now() + timedelta(days=1),
+                            collected_at=timezone.now(),
+                        )
+                        print(f"DEBUG OAuthCallbackView - Stats created: followers={channel_info.get('followers', 0)}")
+                    
+                    # Fetch posts
+                    print(f"DEBUG OAuthCallbackView - Fetching posts...")
+                    posts = service.fetch_posts(limit=15)
+                    print(f"DEBUG OAuthCallbackView - Posts fetched: {len(posts)}")
+                    
+                    for post_data in posts:
+                        from .models import ChannelPost
+                        # Parse published_at
+                        published_at = post_data.get('published_at')
+                        if isinstance(published_at, str):
+                            try:
+                                from dateutil.parser import parse
+                                published_at = parse(published_at)
+                            except:
+                                published_at = timezone.now()
+                        
+                        ChannelPost.objects.update_or_create(
+                            platform=platform_obj,
+                            platform_post_id=post_data.get('platform_post_id'),
+                            defaults={
+                                'title': post_data.get('title', ''),
+                                'content': post_data.get('content', ''),
+                                'post_url': post_data.get('post_url', ''),
+                                'media_urls': post_data.get('media_urls', []),
+                                'media_type': post_data.get('media_type', ''),
+                                'likes': post_data.get('likes', 0),
+                                'comments': post_data.get('comments', 0),
+                                'shares': post_data.get('shares', 0),
+                                'views': post_data.get('views', 0),
+                                'published_at': published_at,
+                                'collected_at': timezone.now(),
+                            }
+                        )
+                    logger.info(f"Synchronous fetch completed for {platform_obj.name}: {platform_obj.channel_id}")
+                    print(f"DEBUG OAuthCallbackView - Sync fetch completed for {platform_obj.name}")
+                except Exception as sex:
+                    print(f"DEBUG OAuthCallbackView - ERROR in sync fetch for {platform_obj.id}: {str(sex)}")
+                    import traceback
+                    traceback.print_exc()
+                    logger.warning(f"Failed synchronous fetch for {platform_obj.id}: {sex}", exc_info=True)
+            
+            redirect_url = (
+                f"{frontend_url}/platforms"
+                f"?oauth_success=1"
+                f"&platform={platform}"
+                f"&count={len(platforms_created)}"
+            )
+            
+        except Exception as e:
+            logger.error(f"OAuth token exchange failed: {e}", exc_info=True)
+            redirect_url = (
+                f"{frontend_url}/platforms"
+                f"?oauth_error=1"
+                f"&platform={platform}"
+                f"&reason=token_exchange_failed"
+            )
+        
+        return HttpResponseRedirect(redirect_url)
+    
+    def _get_user_from_state(self, state):
+        """Extract user from OAuth state parameter"""
+        if not state:
+            return None
+        
+        try:
+            import urllib.parse
+            import json
+            
+            # State might be URL encoded
+            decoded_state = urllib.parse.unquote(state)
+            state_data = json.loads(decoded_state)
+            token = state_data.get('token')
+            
+            if token:
+                from rest_framework_simplejwt.tokens import AccessToken
+                access_token = AccessToken(token)
+                from django.contrib.auth import get_user_model
+                User = get_user_model()
+                return User.objects.filter(id=access_token['user_id']).first()
+        except Exception as e:
+            logger.error(f"Failed to extract user from state: {e}")
+        
+        return None
+    
+    def _exchange_code_for_token(self, request, platform, code):
+        """Exchange authorization code for access token"""
+        # Build redirect URI (must match the one used in authorization)
+        from django.urls import reverse
+        redirect_uri = request.build_absolute_uri(
+            reverse('platform-oauth-callback', args=[platform])
+        )
+        if "127.0.0.1" in redirect_uri:
+            redirect_uri = redirect_uri.replace("127.0.0.1", "localhost")
+        
+        token_url = f"https://graph.facebook.com/{settings.FACEBOOK_API_VERSION}/oauth/access_token"
+        
+        params = {
+            'client_id': settings.FACEBOOK_APP_ID,
+            'client_secret': settings.FACEBOOK_APP_SECRET,
+            'redirect_uri': redirect_uri,
+            'code': code
+        }
+        
+        response = requests.get(token_url, params=params)
+        response.raise_for_status()
+        return response.json()
+    
+    def _get_long_lived_token(self, short_lived_token):
+        """Exchange short-lived token for long-lived token (60 days)"""
+        url = f"https://graph.facebook.com/{settings.FACEBOOK_API_VERSION}/oauth/access_token"
+        
+        params = {
+            'grant_type': 'fb_exchange_token',
+            'client_id': settings.FACEBOOK_APP_ID,
+            'client_secret': settings.FACEBOOK_APP_SECRET,
+            'fb_exchange_token': short_lived_token
+        }
+        
+        response = requests.get(url, params=params)
+        response.raise_for_status()
+        data = response.json()
+        return data.get('access_token')
+    
+    def _get_user_pages(self, access_token):
+        """Get Facebook pages accessible with this token"""
+        url = f"https://graph.facebook.com/{settings.FACEBOOK_API_VERSION}/me/accounts"
+        
+        params = {
+            'access_token': access_token,
+            'fields': 'id,name,access_token,instagram_business_account,picture,fan_count'
+        }
+        
+        response = requests.get(url, params=params)
+        response.raise_for_status()
+        return response.json().get('data', [])
+    
+    def _create_platforms(self, user, platform_type, long_lived_token, pages_data, token_expiry):
+        """Create platform entries for pages"""
+        platforms_created = []
+        
+        for page in pages_data:
+            page_id = page['id']
+            page_name = page['name']
+            page_token = page['access_token']
+            fan_count = page.get('fan_count', 0)
+            
+            # For Instagram, also create Instagram platform if business account exists
+            if platform_type == 'instagram' and page.get('instagram_business_account'):
+                ig_account = page['instagram_business_account']
+                ig_account_id = ig_account['id']
+                
+                # Create or update Instagram platform
+                platform, created = Platform.objects.update_or_create(
+                    user=user,
+                    name='instagram',
+                    channel_id=ig_account_id,
+                    defaults={
+                        'channel_url': f"https://instagram.com/{ig_account_id}",
+                        'channel_name': page_name,
+                        'is_active': True,
+                        'metadata': {
+                            'access_token': long_lived_token,
+                            'page_access_token': page_token,
+                            'page_id': page_id,
+                            'page_name': page_name,
+                            'instagram_account_id': ig_account_id,
+                            'token_expires_at': (
+                                timezone.now() + timedelta(seconds=token_expiry)
+                            ).isoformat(),
+                            'scopes': ['pages_show_list', 'pages_read_engagement']
+                        }
+                    }
+                )
+                platforms_created.append(platform)
+            
+            # Always create Facebook platform for the page
+            platform, created = Platform.objects.update_or_create(
+                user=user,
+                name='facebook',
+                channel_id=page_id,
+                defaults={
+                    'channel_url': f"https://facebook.com/{page_id}",
+                    'channel_name': page_name,
+                    'is_active': True,
+                    'metadata': {
+                        'access_token': long_lived_token,
+                        'page_access_token': page_token,
+                        'page_id': page_id,
+                        'page_name': page_name,
+                        'fan_count': fan_count,
+                        'token_expires_at': (
+                            timezone.now() + timedelta(seconds=token_expiry)
+                        ).isoformat(),
+                        'scopes': ['pages_show_list', 'pages_read_engagement']
+                    }
+                }
+            )
+            platforms_created.append(platform)
+        
+        return platforms_created
 
-        # stub: create a dummy channel id using platform name + user id
-        channel_id = f"{platform}_{user.id}"
-        obj, created = Platform.objects.get_or_create(
+
+class TwitterOAuthInitiateView(APIView):
+    """Initiate Twitter (X) OAuth 2.0 flow"""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        # Check if Twitter OAuth is configured
+        print(f"DEBUG TwitterOAuthInitiateView - TWITTER_APP_ID: {bool(settings.TWITTER_APP_ID)}, TWITTER_APP_SECRET: {bool(settings.TWITTER_APP_SECRET)}")
+        print(f"DEBUG TwitterOAuthInitiateView - APP_ID value: {settings.TWITTER_APP_ID[:20] if settings.TWITTER_APP_ID else 'EMPTY'}")
+        
+        if not settings.TWITTER_APP_ID or not settings.TWITTER_APP_SECRET:
+            print("ERROR: Twitter OAuth credentials missing")
+            # Check if Bearer token is available for system connect
+            if settings.TWITTER_BEARER_TOKEN:
+                return Response({
+                    "error": "OAuth not configured. Use system-connect endpoint instead.",
+                    "use_system_connect": True,
+                    "configured": False
+                }, status=status.HTTP_400_BAD_REQUEST)
+            return Response({
+                "error": "Twitter credentials not configured",
+                "configured": False
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        # Build callback URI
+        from django.urls import reverse
+        redirect_uri = request.build_absolute_uri(
+            reverse('platform-oauth-callback', args=['twitter'])
+        )
+        
+        # Replace 127.0.0.1 with localhost
+        if "127.0.0.1" in redirect_uri:
+            redirect_uri = redirect_uri.replace("127.0.0.1", "localhost")
+        
+        # Get JWT token for state parameter
+        auth_header = request.META.get('HTTP_AUTHORIZATION', '')
+        token_value = None
+        if auth_header.startswith('Bearer '):
+            token_value = auth_header.split(' ', 1)[1]
+        
+        # Generate PKCE code verifier and challenge
+        import secrets
+        import base64
+        import hashlib
+        
+        code_verifier = secrets.token_urlsafe(64)[:128]
+        code_challenge = base64.urlsafe_b64encode(
+            hashlib.sha256(code_verifier.encode()).digest()
+        ).rstrip(b'=').decode('utf-8')
+        
+        # Store code verifier in session or return it (for simplicity, we'll include in state)
+        # In production, store securely in session/DB
+        import urllib.parse
+        state_data = {
+            'token': token_value,
+            'code_verifier': code_verifier
+        }
+        state = urllib.parse.quote(json.dumps(state_data))
+        
+        # Build Twitter OAuth 2.0 authorization URL
+        # Twitter uses OAuth 2.0 with PKCE
+        auth_url = (
+            "https://twitter.com/i/oauth2/authorize"
+            f"?client_id={settings.TWITTER_APP_ID}"
+            f"&redirect_uri={urllib.parse.quote(redirect_uri)}"
+            f"&response_type=code"
+            f"&scope=tweet.read users.read follows.read follows.write"
+            f"&state={state}"
+            f"&code_challenge={code_challenge}"
+            f"&code_challenge_method=S256"
+        )
+        
+        return Response({
+            "auth_url": auth_url,
+            "redirect_uri": redirect_uri,
+            "platform": "twitter"
+        })
+
+
+class TwitterOAuthCallbackView(APIView):
+    """Handle Twitter OAuth callback"""
+    permission_classes = []  # No auth required for OAuth callback
+
+    def get(self, request):
+        code = request.GET.get('code')
+        error = request.GET.get('error')
+        error_description = request.GET.get('error_description')
+        state = request.GET.get('state')
+        
+        frontend_url = settings.FRONTEND_URL.rstrip('/')
+        
+        # Handle OAuth error
+        if error or not code:
+            logger.error(f"OAuth error for Twitter: {error} - {error_description}")
+            redirect_url = (
+                f"{frontend_url}/platforms"
+                f"?oauth_error=1"
+                f"&platform=twitter"
+                f"&reason={error or 'access_denied'}"
+            )
+            return HttpResponseRedirect(redirect_url)
+        
+        # Extract user and code verifier from state
+        user, code_verifier = self._get_user_from_state(state)
+        if not user:
+            logger.error("Could not authenticate user from OAuth state")
+            redirect_url = f"{frontend_url}/platforms?oauth_error=1&reason=authentication_failed"
+            return HttpResponseRedirect(redirect_url)
+        
+        # Exchange code for tokens
+        try:
+            # Build redirect URI
+            from django.urls import reverse
+            redirect_uri = request.build_absolute_uri(
+                reverse('platform-oauth-callback', args=['twitter'])
+            )
+            if "127.0.0.1" in redirect_uri:
+                redirect_uri = redirect_uri.replace("127.0.0.1", "localhost")
+            
+            # Exchange code for tokens
+            token_data = self._exchange_code_for_token(code, redirect_uri, code_verifier)
+            if not token_data:
+                raise Exception("Failed to get access token")
+            
+            access_token = token_data.get('access_token')
+            refresh_token = token_data.get('refresh_token')
+            expires_in = token_data.get('expires_in', 1800)  # Default 30 minutes
+            
+            # Get authenticated user's Twitter account info
+            user_info = self._get_twitter_user_info(access_token)
+            if not user_info:
+                raise Exception("Failed to get Twitter user info")
+            
+            twitter_username = user_info.get('username')
+            twitter_user_id = user_info.get('id')
+            
+            # Create or update platform
+            platform = self._create_or_update_platform(
+                user=user,
+                twitter_user_id=twitter_user_id,
+                twitter_username=twitter_username,
+                access_token=access_token,
+                refresh_token=refresh_token,
+                expires_in=expires_in
+            )
+            
+            # Queue background fetch
+            try:
+                queue_platform_fetch(platform.id, 'initial')
+            except Exception as qex:
+                logger.warning(f"Failed to queue fetch for platform {platform.id}: {qex}")
+            
+            # Also fetch data synchronously so it shows immediately
+            try:
+                from .platform_services import TwitterService
+                service = TwitterService(platform)
+                
+                # Fetch channel info
+                channel_info = service.fetch_channel_info()
+                if channel_info:
+                    platform.channel_name = str(channel_info.get('channel_name') or twitter_username)
+                    platform.profile_picture = str(channel_info.get('profile_picture') or '')
+                    platform.channel_url = f"https://twitter.com/{twitter_username}"
+                    platform.save()
+                    
+                    # Create stats
+                    from .models import ChannelStats
+                    ChannelStats.objects.create(
+                        platform=platform,
+                        followers=channel_info.get('followers', 0),
+                        following=channel_info.get('following', 0),
+                        posts_count=channel_info.get('posts_count', 0),
+                        impressions=channel_info.get('impressions', 0),
+                        period_start=timezone.now().replace(hour=0, minute=0, second=0, microsecond=0),
+                        period_end=timezone.now() + timedelta(days=1),
+                        collected_at=timezone.now(),
+                    )
+                
+                # Fetch tweets
+                tweets = service.fetch_posts(limit=15)
+                for tweet_data in tweets:
+                    from .models import ChannelPost
+                    published_at = tweet_data.get('published_at')
+                    if isinstance(published_at, str):
+                        try:
+                            from dateutil.parser import parse
+                            published_at = parse(published_at)
+                        except:
+                            published_at = timezone.now()
+                    
+                    ChannelPost.objects.update_or_create(
+                        platform=platform,
+                        platform_post_id=tweet_data.get('platform_post_id'),
+                        defaults={
+                            'title': tweet_data.get('title', ''),
+                            'content': tweet_data.get('content', ''),
+                            'post_url': tweet_data.get('post_url', ''),
+                            'media_urls': tweet_data.get('media_urls', []),
+                            'media_type': tweet_data.get('media_type', ''),
+                            'likes': tweet_data.get('likes', 0),
+                            'comments': tweet_data.get('comments', 0),
+                            'shares': tweet_data.get('shares', 0),
+                            'views': tweet_data.get('views', 0),
+                            'published_at': published_at,
+                            'collected_at': timezone.now(),
+                        }
+                    )
+                logger.info(f"Synchronous fetch completed for Twitter: {twitter_username}")
+            except Exception as sex:
+                logger.warning(f"Failed synchronous fetch for Twitter: {sex}")
+            
+            redirect_url = (
+                f"{frontend_url}/platforms"
+                f"?oauth_success=1"
+                f"&platform=twitter"
+            )
+            
+        except Exception as e:
+            logger.error(f"Twitter OAuth token exchange failed: {e}", exc_info=True)
+            redirect_url = (
+                f"{frontend_url}/platforms"
+                f"?oauth_error=1"
+                f"&platform=twitter"
+                f"&reason=token_exchange_failed"
+            )
+        
+        return HttpResponseRedirect(redirect_url)
+    
+    def _get_user_from_state(self, state):
+        """Extract user and code verifier from OAuth state parameter"""
+        if not state:
+            return None, None
+        
+        try:
+            import urllib.parse
+            decoded_state = urllib.parse.unquote(state)
+            state_data = json.loads(decoded_state)
+            token = state_data.get('token')
+            code_verifier = state_data.get('code_verifier')
+            
+            if token:
+                from rest_framework_simplejwt.tokens import AccessToken
+                access_token = AccessToken(token)
+                from django.contrib.auth import get_user_model
+                User = get_user_model()
+                user = User.objects.filter(id=access_token['user_id']).first()
+                return user, code_verifier
+        except Exception as e:
+            logger.error(f"Failed to extract user from state: {e}")
+        
+        return None, None
+    
+    def _exchange_code_for_token(self, code, redirect_uri, code_verifier):
+        """Exchange authorization code for access token"""
+        import urllib.request
+        import urllib.parse
+        
+        token_url = "https://api.twitter.com/2/oauth2/token"
+        
+        # URL encode the credentials
+        import base64
+        credentials = f"{settings.TWITTER_APP_ID}:{settings.TWITTER_APP_SECRET}"
+        encoded_credentials = base64.b64encode(credentials.encode()).decode()
+        
+        data = urllib.parse.urlencode({
+            'grant_type': 'authorization_code',
+            'code': code,
+            'redirect_uri': redirect_uri,
+            'client_id': settings.TWITTER_APP_ID,
+            'code_verifier': code_verifier,
+        }).encode()
+        
+        req = urllib.request.Request(
+            token_url,
+            data=data,
+            method='POST'
+        )
+        req.add_header('Authorization', f'Basic {encoded_credentials}')
+        req.add_header('Content-Type', 'application/x-www-form-urlencoded')
+        
+        try:
+            with urllib.request.urlopen(req, timeout=30) as response:
+                return json.loads(response.read().decode())
+        except Exception as e:
+            logger.error(f"Token exchange failed: {e}")
+            return None
+    
+    def _get_twitter_user_info(self, access_token):
+        """Get authenticated user's Twitter info"""
+        url = "https://api.twitter.com/2/users/me"
+        params = {
+            'user.fields': 'public_metrics,description,profile_image_url,created_at'
+        }
+        
+        import urllib.request
+        import urllib.parse
+        
+        full_url = f"{url}?{urllib.parse.urlencode(params)}"
+        req = urllib.request.Request(full_url)
+        req.add_header('Authorization', f'Bearer {access_token}')
+        
+        try:
+            with urllib.request.urlopen(req, timeout=30) as response:
+                data = json.loads(response.read().decode())
+                if data.get('data'):
+                    user = data['data']
+                    # Get the username from the 'username' field, not 'name'
+                    return {
+                        'id': user.get('id'),
+                        'username': user.get('username'),
+                        'name': user.get('name'),
+                        'profile_image_url': user.get('profile_image_url'),
+                    }
+        except Exception as e:
+            logger.error(f"Failed to get Twitter user info: {e}")
+        return None
+    
+    def _create_or_update_platform(self, user, twitter_user_id, twitter_username, access_token, refresh_token, expires_in):
+        """Create or update Twitter platform"""
+        platform, created = Platform.objects.update_or_create(
             user=user,
-            name=platform,
-            channel_id=channel_id,
+            name='twitter',
+            channel_id=twitter_user_id,
             defaults={
-                'channel_url': '',
-                'channel_name': channel_id,
-                'metadata': {'oauth_code': code}
+                'channel_url': f"https://twitter.com/{twitter_username}",
+                'channel_name': twitter_username,
+                'is_active': True,
+                'metadata': {
+                    'access_token': access_token,
+                    'refresh_token': refresh_token,
+                    'username': twitter_username,
+                    'token_expires_at': (
+                        timezone.now() + timedelta(seconds=expires_in)
+                    ).isoformat(),
+                    'scopes': ['tweet.read', 'users.read', 'follows.read', 'follows.write'],
+                    'oauth_type': 'oauth2',
+                }
             }
         )
-        if not created:
-            obj.metadata['oauth_code'] = code
-            obj.is_active = True
-            obj.save()
+        return platform
 
-        # kick off a fetch for the new platform via Kafka
+
+class SystemTwitterConnectView(APIView):
+    """Connect Twitter using pre-configured system credentials (.env)"""
+    permission_classes = [IsAuthenticated]
+    
+    def post(self, request):
+        bearer_token = settings.TWITTER_BEARER_TOKEN
+        
+        if not bearer_token:
+            return Response({
+                "error": "Twitter credentials (TWITTER_BEARER_TOKEN) not configured in .env",
+                "configured": False
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Get username from request body
+        username = request.data.get('username', '').lstrip('@')
+        
+        if not username:
+            return Response({
+                "error": "Username is required"
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Check if platform already exists
+        existing = Platform.objects.filter(
+            user=request.user,
+            name='twitter',
+            channel_id=username
+        ).first()
+        
+        if existing:
+            return Response({
+                "message": f"Twitter @{username} already connected via system credentials",
+                "data": PlatformSerializer(existing).data
+            })
+        
+        # Create platform
+        new_platform = Platform.objects.create(
+            user=request.user,
+            name='twitter',
+            channel_id=username,
+            channel_url=f"https://twitter.com/{username}",
+            channel_name=username,
+            metadata={
+                "system_auth": True,
+                "bearer_token": bearer_token,
+                "oauth_type": "bearer_token",
+            }
+        )
+        
         try:
-            queue_platform_fetch(obj.id, 'initial')
-        except Exception as qex:
-            logger.warning(f"OAuth: Failed to queue background fetch: {qex}")
+            queue_platform_fetch(new_platform.id, "initial")
+            message = f"Twitter @{username} connected successfully using system credentials."
+        except Exception as e:
+            message = f"Twitter @{username} connected, but background fetch failed to queue."
+            
+        return Response({
+            "message": message,
+            "data": PlatformSerializer(new_platform).data,
+            "configured": True
+        })
 
-        from django.http import HttpResponseRedirect
-        # send user to the platforms dashboard (adjust path depending on frontend routing)
-        redirect_url = f"{frontend}/(dashboard)/platforms?oauth_success=1&platform={platform}"
-        return HttpResponseRedirect(redirect_url)
+    def get(self, request):
+        """Check if system credentials are configured"""
+        is_configured = bool(settings.TWITTER_BEARER_TOKEN)
+        return Response({
+            "platform": "twitter",
+            "configured": is_configured
+        })
 
 
 class PlatformRefreshView(APIView):
@@ -519,7 +1126,7 @@ class PlatformChannelDataView(APIView):
                 period_end = now
         
         # Get posts within period
-        posts = platform.posts.filter(
+        posts = platform.posts.filter(  # type: ignore[attr-defined]
             published_at__gte=period_start,
             published_at__lte=period_end
         )
@@ -579,7 +1186,7 @@ class SentimentSearchTriggerView(APIView):
         )
         
         # Get posts without sentiment (blank string). field is blankable, not nullable.
-        posts = platform.posts.filter(sentiment_label="")[:50]
+        posts = platform.posts.filter(sentiment_label="")[:50]  # type: ignore[attr-defined]
         
         if not posts.exists():
             return Response({

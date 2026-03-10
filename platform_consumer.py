@@ -25,26 +25,117 @@ youtube = build("youtube", "v3", developerKey=YOUTUBE_API_KEY) if YOUTUBE_API_KE
 from platforms.youtube_service import fetch_youtube_channel_data
 
 def fetch_instagram_data(account_id, platform_obj):
-    """Placeholder for Instagram data fetching"""
-    logger.info(f"Instagram fetching not yet implemented for {account_id}")
+    """Fetch Instagram data using meta_services"""
+    try:
+        from platforms.meta_services import InstagramService
+        service = InstagramService(platform_obj)
+        
+        # Fetch channel info
+        channel_info = service.fetch_channel_info()
+        if channel_info:
+            platform_obj.channel_name = channel_info.get('channel_name', platform_obj.channel_id)
+            platform_obj.profile_picture = channel_info.get('profile_picture', '')
+            platform_obj.save()
+            
+            # Create stats
+            ChannelStats.objects.create(
+                platform=platform_obj,
+                followers=channel_info.get('followers', 0),
+                posts_count=channel_info.get('posts_count', 0),
+                period_start=timezone.now().replace(hour=0, minute=0, second=0, microsecond=0),
+                period_end=timezone.now() + timedelta(days=1),
+                collected_at=timezone.now(),
+            )
+        
+        # Fetch posts
+        posts = service.fetch_posts(limit=15)
+        for post_data in posts:
+            ChannelPost.objects.update_or_create(
+                platform=platform_obj,
+                platform_post_id=post_data.get('platform_post_id'),
+                defaults={
+                    'title': post_data.get('title', ''),
+                    'content': post_data.get('content', ''),
+                    'post_url': post_data.get('post_url', ''),
+                    'media_urls': post_data.get('media_urls', []),
+                    'media_type': post_data.get('media_type', ''),
+                    'likes': post_data.get('likes', 0),
+                    'comments': post_data.get('comments', 0),
+                    'shares': post_data.get('shares', 0),
+                    'views': post_data.get('views', 0),
+                    'published_at': post_data.get('published_at'),
+                    'collected_at': timezone.now(),
+                }
+            )
+        
+        logger.info(f"Instagram data fetched successfully for {account_id}")
+        return True
+    except Exception as e:
+        logger.error(f"Error fetching Instagram data: {e}", exc_info=True)
+        return False
+
+
+def fetch_facebook_data(page_id, platform_obj):
+    """Fetch Facebook data using meta_services"""
+    try:
+        from platforms.meta_services import FacebookService
+        service = FacebookService(platform_obj)
+        
+        # Fetch channel info
+        channel_info = service.fetch_channel_info()
+        if channel_info:
+            platform_obj.channel_name = channel_info.get('channel_name', platform_obj.channel_id)
+            platform_obj.profile_picture = channel_info.get('profile_picture', '')
+            platform_obj.save()
+            
+            # Create stats
+            ChannelStats.objects.create(
+                platform=platform_obj,
+                followers=channel_info.get('followers', 0),
+                posts_count=channel_info.get('posts_count', 0),
+                impressions=channel_info.get('total_reach', 0),
+                period_start=timezone.now().replace(hour=0, minute=0, second=0, microsecond=0),
+                period_end=timezone.now() + timedelta(days=1),
+                collected_at=timezone.now(),
+            )
+        
+        # Fetch posts
+        posts = service.fetch_posts(limit=15)
+        for post_data in posts:
+            ChannelPost.objects.update_or_create(
+                platform=platform_obj,
+                platform_post_id=post_data.get('platform_post_id'),
+                defaults={
+                    'title': post_data.get('title', ''),
+                    'content': post_data.get('content', ''),
+                    'post_url': post_data.get('post_url', ''),
+                    'media_urls': post_data.get('media_urls', []),
+                    'media_type': post_data.get('media_type', ''),
+                    'likes': post_data.get('likes', 0),
+                    'comments': post_data.get('comments', 0),
+                    'shares': post_data.get('shares', 0),
+                    'views': post_data.get('views', 0),
+                    'published_at': post_data.get('published_at'),
+                    'collected_at': timezone.now(),
+                }
+            )
+        
+        logger.info(f"Facebook data fetched successfully for {page_id}")
+        return True
+    except Exception as e:
+        logger.error(f"Error fetching Facebook data: {e}", exc_info=True)
+        return False
+
+
+def fetch_linkedin_data(profile_id, platform_obj):
+    """Placeholder for LinkedIn data fetching"""
+    logger.info(f"LinkedIn fetching not yet implemented for {profile_id}")
     return False
 
 
 def fetch_twitter_data(username, platform_obj):
     """Placeholder for Twitter data fetching"""
     logger.info(f"Twitter fetching not yet implemented for {username}")
-    return False
-
-
-def fetch_facebook_data(page_id, platform_obj):
-    """Placeholder for Facebook data fetching"""
-    logger.info(f"Facebook fetching not yet implemented for {page_id}")
-    return False
-
-
-def fetch_linkedin_data(profile_id, platform_obj):
-    """Placeholder for LinkedIn data fetching"""
-    logger.info(f"LinkedIn fetching not yet implemented for {profile_id}")
     return False
 
 
