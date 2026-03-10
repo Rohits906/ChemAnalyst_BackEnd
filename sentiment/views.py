@@ -124,47 +124,165 @@ class SentimentDashboardView(APIView):
 class SocialMediaSearchView(APIView):
     permission_classes = [IsAuthenticated]
 
-    def _fetch_instagram(self, keyword):
+    def _fetch_instagram(self, keyword, hours=None):
         if (
             not settings.INSTAGRAM_ACCESS_TOKEN
             or not settings.INSTAGRAM_BUSINESS_ACCOUNT_ID
         ):
+            print(f"Instagram credentials missing - ACCESS_TOKEN: {bool(settings.INSTAGRAM_ACCESS_TOKEN)}, ACCOUNT_ID: {bool(settings.INSTAGRAM_BUSINESS_ACCOUNT_ID)}")
             return []
 
-        hashtag = keyword.replace(" ", "").lower()
-        search_url = "https://graph.facebook.com/v22.0/ig_hashtag_search"
-        params = {
-            "user_id": settings.INSTAGRAM_BUSINESS_ACCOUNT_ID,
-            "q": hashtag,
-            "access_token": settings.INSTAGRAM_ACCESS_TOKEN,
-        }
+        posts = []
+        seen_ids = set()
 
+        # Strip leading/trailing # from keyword if present
+        clean_keyword = keyword.strip().lstrip('#').rstrip('#')
+        
+        # Try multiple hashtag variations
+        hashtag_variations = [
+            clean_keyword.replace(" ", "").lower(),  # Remove spaces
+            clean_keyword.lower(),  # Keep spaces converted to lowercase
+            clean_keyword.replace(" ", "_").lower(),  # Underscores
+        ]
+
+        for hashtag in hashtag_variations:
+            search_url = "https://graph.facebook.com/v22.0/ig_hashtag_search"
+            params = {
+                "user_id": settings.INSTAGRAM_BUSINESS_ACCOUNT_ID,
+                "q": hashtag,
+                "access_token": settings.INSTAGRAM_ACCESS_TOKEN,
+            }
+
+            try:
+                print(f"Searching Instagram hashtag: #{hashtag}")
+                response = requests.get(search_url, params=params)
+                data = response.json()
+                
+                # Check for API errors
+                if "error" in data:
+                    print(f"Instagram API error for hashtag #{hashtag}: {data.get('error', {}).get('message')}")
+                    continue
+                    
+                if "data" not in data or not data["data"]:
+                    print(f"No hashtag found for: #{hashtag}")
+                    continue
+                    
+                hashtag_id = data["data"][0]["id"]
+                print(f"Found hashtag ID: {hashtag_id}")
+
+                # Fetch media from hashtag
+                for endpoint in ["recent_media", "top_media"]:
+                    media_url = f"https://graph.facebook.com/v22.0/{hashtag_id}/{endpoint}"
+                    media_params = {
+                        "user_id": settings.INSTAGRAM_BUSINESS_ACCOUNT_ID,
+                        "fields": "id,caption,media_type,media_url,permalink,timestamp,username,like_count,comments_count",
+                        "limit": 50,
+                        "access_token": settings.INSTAGRAM_ACCESS_TOKEN,
+                    }
+                    media_response = requests.get(media_url, params=media_params)
+                    media_data = media_response.json()
+                    
+                    if "error" in media_data:
+                        print(f"Instagram media fetch error for {endpoint}: {media_data.get('error', {}).get('message')}")
+                        continue
+                        
+                    if "data" in media_data:
+                        fetched_count = 0
+                        for item in media_data["data"]:
+                            if item["id"] not in seen_ids:
+                                posts.append(item)
+                                seen_ids.add(item["id"])
+                                fetched_count += 1
+                        print(f"Fetched {fetched_count} posts from {endpoint}")
+                
+                # If we found posts, return them
+                if posts:
+                    print(f"Total Instagram posts found: {len(posts)}")
+                    return posts
+                    
+            except Exception as e:
+                print(f"Instagram fetch error for hashtag #{hashtag}: {str(e)}")
+                continue
+        
+        print(f"No Instagram posts found for keyword: {keyword}")
+        return posts
+
+    def _fetch_facebook(self, keyword, hours=None):
+        """Fetch Facebook posts by keyword using Meta Graph API"""
+        if (
+            not settings.FACEBOOK_PAGE_ACCESS_TOKEN
+            or not settings.FACEBOOK_PAGE_ID
+        ):
+            print(f"Facebook credentials missing - PAGE_TOKEN: {bool(settings.FACEBOOK_PAGE_ACCESS_TOKEN)}, PAGE_ID: {bool(settings.FACEBOOK_PAGE_ID)}")
+            return []
+
+        posts = []
         try:
+            # Search for posts on the Facebook page containing the keyword
+            search_url = f"https://graph.facebook.com/v22.0/{settings.FACEBOOK_PAGE_ID}/feed"
+            params = {
+                "fields": "id,message,story,created_time,type,permalink_url,likes.limit(0).summary(total_count),comments.limit(0).summary(total_count),shares.limit(0).summary(total_count)",
+                "limit": 100,
+                "access_token": settings.FACEBOOK_PAGE_ACCESS_TOKEN,
+            }
+
+            # Optional: add time-based filter
+            if hours:
+                try:
+                    hours_int = int(hours)
+                    time_threshold = timezone.now() - timedelta(hours=hours_int)
+                    # Facebook API uses since and until parameters (Unix timestamps)
+                    params["since"] = int(time_threshold.timestamp())
+                except ValueError:
+                    pass
+
+            print(f"Fetching Facebook posts for keyword: {keyword}")
             response = requests.get(search_url, params=params)
             data = response.json()
-            if "data" not in data or not data["data"]:
-                return []
-            hashtag_id = data["data"][0]["id"]
 
-            posts = []
-            seen_ids = set()
-            for endpoint in ["recent_media", "top_media"]:
-                media_url = f"https://graph.facebook.com/v22.0/{hashtag_id}/{endpoint}"
-                media_params = {
-                    "user_id": settings.INSTAGRAM_BUSINESS_ACCOUNT_ID,
-                    "fields": "id,caption,media_type,media_url,permalink,timestamp",
-                    "access_token": settings.INSTAGRAM_ACCESS_TOKEN,
-                }
-                media_response = requests.get(media_url, params=media_params)
-                media_data = media_response.json()
-                if "data" in media_data:
-                    for item in media_data["data"]:
-                        if item["id"] not in seen_ids:
-                            posts.append(item)
-                            seen_ids.add(item["id"])
+            # Check for API errors
+            if "error" in data:
+                print(f"Facebook API error: {data.get('error', {}).get('message')}")
+                return []
+
+            fetched_count = 0
+            if "data" in data:
+                for item in data.get("data", []):
+                    # Check in multiple fields for the keyword
+                    message = item.get("message", "") or item.get("story", "")
+                    attachments_desc = ""
+                    attachments_title = ""
+                    
+                    # Check attachments for keyword as well
+                    attachments = item.get("attachments", {}).get("data", [])
+                    if attachments:
+                        for attachment in attachments:
+                            attachments_desc += attachment.get("description", "") or ""
+                            attachments_title += attachment.get("title", "") or ""
+                    
+                    # Search in all these fields
+                    search_text = (message + attachments_desc + attachments_title).lower()
+                    
+                    if keyword.lower() in search_text:
+                        posts.append({
+                            "id": item.get("id"),
+                            "message": message,
+                            "created_time": item.get("created_time"),
+                            "type": item.get("type"),
+                            "permalink_url": item.get("permalink_url"),
+                            "likes": item.get("likes", {}).get("summary", {}).get("total_count", 0),
+                            "comments": item.get("comments", {}).get("summary", {}).get("total_count", 0),
+                            "shares": item.get("shares", {}).get("summary", {}).get("total_count", 0),
+                        })
+                        fetched_count += 1
+                
+            print(f"Found {fetched_count} Facebook posts for keyword: {keyword}")
             return posts
+            
         except Exception as e:
-            print("error occured", e)
+            print(f"Facebook fetch error: {str(e)}")
+            import traceback
+            traceback.print_exc()
             return []
 
     def _fetch_youtube(self, keyword, hours=None):
@@ -216,6 +334,7 @@ class SocialMediaSearchView(APIView):
 
     def _fetch_twitter(self, keyword, hours=None):
         if not settings.TWITTER_BEARER_TOKEN:
+            print("Twitter credentials missing - BEARER_TOKEN: False")
             return []
         url = "https://api.twitter.com/2/tweets/search/recent"
         headers = {"Authorization": f"Bearer {settings.TWITTER_BEARER_TOKEN}"}
@@ -237,8 +356,16 @@ class SocialMediaSearchView(APIView):
                 pass
 
         try:
+            print(f"Searching Twitter for keyword: {keyword}")
             response = requests.get(url, headers=headers, params=params)
             data = response.json()
+            
+            # Check for API errors
+            if "errors" in data:
+                error_msg = data.get("errors", [{}])[0].get("message", "Unknown error")
+                print(f"Twitter API error: {error_msg}")
+                return []
+            
             results = []
             
             # Create a map for user data
@@ -248,6 +375,8 @@ class SocialMediaSearchView(APIView):
                     users_map[user["id"]] = user["username"]
 
             if "data" in data:
+                fetched_count = len(data["data"])
+                print(f"Found {fetched_count} Twitter posts for keyword: {keyword}")
                 for item in data["data"]:
                     author_id = item.get("author_id")
                     username = users_map.get(author_id, "unknown")
@@ -260,20 +389,26 @@ class SocialMediaSearchView(APIView):
                             "permalink": f"https://twitter.com/{username}/status/{item['id']}",
                         }
                     )
+            else:
+                print(f"No Twitter posts found for keyword: {keyword}")
             return results
         except Exception as e:
-            print("error occured", e)
+            print(f"Twitter fetch error: {str(e)}")
+            import traceback
+            traceback.print_exc()
             return []
 
     def perform_search(self, keyword, hours=None):
         all_posts = []
-        current_idd = 1
+        current_id = 1
+
+        # Fetch from Twitter
         twitter_raw = self._fetch_twitter(keyword, hours=hours)
         for post in twitter_raw:
             text = post.get("text", "")
             all_posts.append(
                 {
-                    "id": current_idd,
+                    "id": current_id,
                     "post_id": post.get("id"),
                     "post_title": text[:50] + "..." if len(text) > 50 else text,
                     "post_text": text,
@@ -284,20 +419,21 @@ class SocialMediaSearchView(APIView):
                     "extra_details": {},
                 }
             )
-            current_idd += 1
+            current_id += 1
 
-        instagram_raw = self._fetch_instagram(keyword)
+        # Fetch from Instagram
+        instagram_raw = self._fetch_instagram(keyword, hours=hours)
         for post in instagram_raw:
             caption = post.get("caption", "")
             all_posts.append(
                 {
-                    "id": current_idd,
+                    "id": current_id,
                     "post_id": post.get("id"),
                     "post_title": caption[:50].replace("\n", " ") if caption else "Instagram Post",
                     "post_text": caption,
                     "post_url": post.get("permalink"),
                     "platform": "instagram",
-                    "author": post.get("username", ""), 
+                    "author": post.get("username", "N/A"),
                     "published_at": post.get("timestamp"),
                     "extra_details": {
                         "media_type": post.get("media_type"),
@@ -305,13 +441,38 @@ class SocialMediaSearchView(APIView):
                     },
                 }
             )
-            current_idd += 1
+            current_id += 1
 
+        # Fetch from Facebook
+        facebook_raw = self._fetch_facebook(keyword, hours=hours)
+        for post in facebook_raw:
+            message = post.get("message", "") or post.get("story", "")
+            all_posts.append(
+                {
+                    "id": current_id,
+                    "post_id": post.get("id"),
+                    "post_title": message[:50].replace("\n", " ") if message else "Facebook Post",
+                    "post_text": message,
+                    "post_url": post.get("permalink_url"),
+                    "platform": "facebook",
+                    "author": "Page",
+                    "published_at": post.get("created_time"),
+                    "extra_details": {
+                        "type": post.get("type"),
+                        "likes": post.get("likes", 0),
+                        "comments": post.get("comments", 0),
+                        "shares": post.get("shares", 0),
+                    },
+                }
+            )
+            current_id += 1
+
+        # Fetch from YouTube
         youtube_raw = self._fetch_youtube(keyword, hours=hours)
         for post in youtube_raw:
             all_posts.append(
                 {
-                    "id": current_idd,
+                    "id": current_id,
                     "post_id": post.get("id"),
                     "post_title": post.get("title"),
                     "post_text": post.get("description"),
@@ -322,9 +483,9 @@ class SocialMediaSearchView(APIView):
                     "extra_details": post.get("extra_details", {}),
                 }
             )
-            current_idd += 1
-        
-        # If hours filter is provided, filter all_posts by published_at
+            current_id += 1
+
+        # Filter by hours if provided
         if hours:
             try:
                 hours_int = int(hours)
@@ -334,12 +495,14 @@ class SocialMediaSearchView(APIView):
                     pub_at = post.get("published_at")
                     if pub_at:
                         try:
-                            # Handling ISO 8601 strings commonly returned by APIs
-                            dt = datetime.fromisoformat(pub_at.replace("Z", "+00:00"))
+                            # Handle ISO 8601 strings
+                            if isinstance(pub_at, str):
+                                dt = datetime.fromisoformat(pub_at.replace("Z", "+00:00"))
+                            else:
+                                dt = pub_at
                             if dt >= time_threshold:
                                 filtered_posts.append(post)
-                        except ValueError:
-                            # Fallback if format is slightly different
+                        except (ValueError, TypeError):
                             filtered_posts.append(post)
                     else:
                         filtered_posts.append(post)
@@ -349,15 +512,17 @@ class SocialMediaSearchView(APIView):
 
         add_to_sentiment_quene(all_posts, keyword=keyword)
         
-        # Re-calculate counts if filtered
+        # Calculate counts by platform
         yt_count = len([p for p in all_posts if p['platform'] == 'youtube'])
         ig_count = len([p for p in all_posts if p['platform'] == 'instagram'])
         tw_count = len([p for p in all_posts if p['platform'] == 'twitter'])
+        fb_count = len([p for p in all_posts if p['platform'] == 'facebook'])
 
         return {
             "youtube": yt_count,
             "instagram": ig_count,
             "twitter": tw_count,
+            "facebook": fb_count,
         }
 
     def get(self, request):
@@ -390,6 +555,7 @@ class UserKeywordSearchTriggerView(SocialMediaSearchView):
             "youtube": 0,
             "instagram": 0,
             "twitter": 0,
+            "facebook": 0,
         }
         processed_keywords = []
 
