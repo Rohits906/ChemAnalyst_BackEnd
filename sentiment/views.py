@@ -12,22 +12,7 @@ from datetime import datetime, timedelta
 from .models import SentimentPost, User_Keyword, Sentiment
 from .serializers import UserKeywordSerializer, UserSentimentSerializer
 from .producers import add_to_sentiment_quene
-import random
-
-# Predefined locations for heuristic tagging when source API lacks geo data
-HEURISTIC_LOCATIONS = [
-    {"name": "Lucknow", "lat": 26.8467, "lng": 80.9462, "type": "city"},
-    {"name": "Mumbai", "lat": 19.0760, "lng": 72.8777, "type": "city"},
-    {"name": "Delhi", "lat": 28.6139, "lng": 77.2090, "type": "city"},
-    {"name": "New York", "lat": 40.7128, "lng": -74.0060, "type": "city"},
-    {"name": "London", "lat": 51.5074, "lng": -0.1278, "type": "city"},
-    {"name": "Paris", "lat": 48.8566, "lng": 2.3522, "type": "city"},
-    {"name": "Tokyo", "lat": 35.6895, "lng": 139.6917, "type": "city"},
-    {"name": "Sydney", "lat": -33.8688, "lng": 151.2093, "type": "city"},
-    {"name": "Dubai", "lat": 25.2048, "lng": 55.2708, "type": "city"},
-    {"name": "Singapore", "lat": 1.3521, "lng": 103.8198, "type": "city"},
-    {"name": "China", "lat": 35.8617, "lng": 104.1954, "type": "country"},
-]
+from platforms.models import UserSocialAccount
 
 
 class SentimentDashboardView(APIView):
@@ -161,9 +146,20 @@ class SocialMediaSearchView(APIView):
             data = response.json()
             if "data" not in data or not data["data"]:
                 return []
-            hashtag_id = data["data"][0]["id"]
-
-            posts = []
+            
+            # Create a fake account object for .env credentials
+            class EnvAccount:
+                def __init__(self):
+                    self.access_token = settings.FACEBOOK_PAGE_ACCESS_TOKEN
+                    self.account_id = settings.FACEBOOK_PAGE_ID
+                    self.account_name = "System Facebook Page"
+            
+            all_accounts = [EnvAccount()]
+            print(f"🔄 [FACEBOOK] Using system credentials from .env for page: {settings.FACEBOOK_PAGE_ID}")
+        
+        # Step 3: Fetch posts from all connected accounts
+        try:
+            api_version = getattr(settings, 'FACEBOOK_API_VERSION', 'v19.0')
             seen_ids = set()
             for endpoint in ["recent_media", "top_media"]:
                 media_url = f"https://graph.facebook.com/v22.0/{hashtag_id}/{endpoint}"
@@ -180,8 +176,11 @@ class SocialMediaSearchView(APIView):
                             posts.append(item)
                             seen_ids.add(item["id"])
             return posts
+            
         except Exception as e:
-            print("instagram error occured", e)
+            print(f"❌ [FACEBOOK] Fetch error: {str(e)}")
+            import traceback
+            traceback.print_exc()
             return []
 
     def _fetch_facebook(self, keyword, user=None):
@@ -358,6 +357,7 @@ class SocialMediaSearchView(APIView):
 
     def _fetch_twitter(self, keyword, hours=None):
         if not settings.TWITTER_BEARER_TOKEN:
+            print("Twitter credentials missing - BEARER_TOKEN: False")
             return []
         url = "https://api.twitter.com/2/tweets/search/recent"
         headers = {"Authorization": f"Bearer {settings.TWITTER_BEARER_TOKEN}"}
@@ -379,8 +379,16 @@ class SocialMediaSearchView(APIView):
                 pass
 
         try:
+            print(f"Searching Twitter for keyword: {keyword}")
             response = requests.get(url, headers=headers, params=params)
             data = response.json()
+            
+            # Check for API errors
+            if "errors" in data:
+                error_msg = data.get("errors", [{}])[0].get("message", "Unknown error")
+                print(f"Twitter API error: {error_msg}")
+                return []
+            
             results = []
             
             # Create a map for user data
@@ -390,6 +398,8 @@ class SocialMediaSearchView(APIView):
                     users_map[user["id"]] = user["username"]
 
             if "data" in data:
+                fetched_count = len(data["data"])
+                print(f"Found {fetched_count} Twitter posts for keyword: {keyword}")
                 for item in data["data"]:
                     author_id = item.get("author_id")
                     username = users_map.get(author_id, "unknown")
@@ -403,13 +413,12 @@ class SocialMediaSearchView(APIView):
                         }
                     )
             else:
-                if "errors" in data:
-                    print(f"Twitter API Errors: {data['errors']}")
-                elif "detail" in data:
-                    print(f"Twitter API Detail: {data['detail']}")
+                print(f"No Twitter posts found for keyword: {keyword}")
             return results
         except Exception as e:
-            print("error occured", e)
+            print(f"Twitter fetch error: {str(e)}")
+            import traceback
+            traceback.print_exc()
             return []
 
     def perform_search(self, keyword, hours=None, user=None):
@@ -434,7 +443,7 @@ class SocialMediaSearchView(APIView):
             text = post.get("text", "")
             all_posts.append(
                 {
-                    "id": current_idd,
+                    "id": current_id,
                     "post_id": post.get("id"),
                     "post_title": text[:50] + "..." if len(text) > 50 else text,
                     "post_text": text,
@@ -449,20 +458,21 @@ class SocialMediaSearchView(APIView):
                     "extra_details": {},
                 }
             )
-            current_idd += 1
+            current_id += 1
 
-        instagram_raw = self._fetch_instagram(keyword)
+        # Fetch from Instagram
+        instagram_raw = self._fetch_instagram(keyword, hours=hours)
         for post in instagram_raw:
             caption = post.get("caption", "")
             all_posts.append(
                 {
-                    "id": current_idd,
+                    "id": current_id,
                     "post_id": post.get("id"),
                     "post_title": caption[:50].replace("\n", " ") if caption else "Instagram Post",
                     "post_text": caption,
                     "post_url": post.get("permalink"),
                     "platform": "instagram",
-                    "author": post.get("username", ""), 
+                    "author": post.get("username", "N/A"),
                     "published_at": post.get("timestamp"),
                     "latitude": geo_info["lat"],
                     "longitude": geo_info["lng"],
@@ -474,13 +484,38 @@ class SocialMediaSearchView(APIView):
                     },
                 }
             )
-            current_idd += 1
+            current_id += 1
 
+        # Fetch from Facebook
+        facebook_raw = self._fetch_facebook(keyword, hours=hours)
+        for post in facebook_raw:
+            message = post.get("message", "") or post.get("story", "")
+            all_posts.append(
+                {
+                    "id": current_id,
+                    "post_id": post.get("id"),
+                    "post_title": message[:50].replace("\n", " ") if message else "Facebook Post",
+                    "post_text": message,
+                    "post_url": post.get("permalink_url"),
+                    "platform": "facebook",
+                    "author": "Page",
+                    "published_at": post.get("created_time"),
+                    "extra_details": {
+                        "type": post.get("type"),
+                        "likes": post.get("likes", 0),
+                        "comments": post.get("comments", 0),
+                        "shares": post.get("shares", 0),
+                    },
+                }
+            )
+            current_id += 1
+
+        # Fetch from YouTube
         youtube_raw = self._fetch_youtube(keyword, hours=hours)
         for post in youtube_raw:
             all_posts.append(
                 {
-                    "id": current_idd,
+                    "id": current_id,
                     "post_id": post.get("id"),
                     "post_title": post.get("title"),
                     "post_text": post.get("description"),
@@ -535,12 +570,14 @@ class SocialMediaSearchView(APIView):
                     pub_at = post.get("published_at")
                     if pub_at:
                         try:
-                            # Handling ISO 8601 strings commonly returned by APIs
-                            dt = datetime.fromisoformat(pub_at.replace("Z", "+00:00"))
+                            # Handle ISO 8601 strings
+                            if isinstance(pub_at, str):
+                                dt = datetime.fromisoformat(pub_at.replace("Z", "+00:00"))
+                            else:
+                                dt = pub_at
                             if dt >= time_threshold:
                                 filtered_posts.append(post)
-                        except ValueError:
-                            # Fallback if format is slightly different
+                        except (ValueError, TypeError):
                             filtered_posts.append(post)
                     else:
                         filtered_posts.append(post)
@@ -550,7 +587,7 @@ class SocialMediaSearchView(APIView):
 
         add_to_sentiment_quene(all_posts, keyword=keyword)
         
-        # Re-calculate counts if filtered
+        # Calculate counts by platform
         yt_count = len([p for p in all_posts if p['platform'] == 'youtube'])
         ig_count = len([p for p in all_posts if p['platform'] == 'instagram'])
         tw_count = len([p for p in all_posts if p['platform'] == 'twitter'])
@@ -597,6 +634,7 @@ class UserKeywordSearchTriggerView(SocialMediaSearchView):
             "youtube": 0,
             "instagram": 0,
             "twitter": 0,
+            "facebook": 0,
         }
         processed_keywords = []
 
