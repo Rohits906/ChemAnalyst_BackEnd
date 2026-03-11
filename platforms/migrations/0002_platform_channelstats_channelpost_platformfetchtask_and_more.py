@@ -97,9 +97,6 @@ class Migration(migrations.Migration):
                 ('user', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, to=settings.AUTH_USER_MODEL)),
             ],
         ),
-        migrations.DeleteModel(
-            name='AddPlatform',
-        ),
         migrations.AddIndex(
             model_name='platform',
             index=models.Index(fields=['user', 'is_active'], name='platforms_p_user_id_7c68a9_idx'),

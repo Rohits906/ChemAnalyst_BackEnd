@@ -3,6 +3,75 @@ import uuid
 from django.contrib.auth.models import User
 from django.utils import timezone
 import json
+from datetime import timedelta
+
+
+class UserSocialAccount(models.Model):
+    """Stores each user's connected social media accounts with OAuth tokens"""
+    PLATFORM_CHOICES = [
+        ("facebook", "Facebook"),
+        ("instagram", "Instagram"),
+        ("twitter", "Twitter"),
+        ("youtube", "YouTube"),
+    ]
+    
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="social_accounts")
+    platform = models.CharField(max_length=50, choices=PLATFORM_CHOICES)
+    
+    # OAuth tokens (stored in metadata for security)
+    access_token = models.TextField()  # Encrypted in metadata
+    refresh_token = models.TextField(blank=True, null=True)  # Optional
+    token_expiry = models.DateTimeField()
+    is_token_valid = models.BooleanField(default=True)
+    
+    # Account details
+    account_id = models.CharField(max_length=255)
+    account_name = models.CharField(max_length=255)
+    account_email = models.CharField(max_length=255, blank=True)
+    profile_picture_url = models.URLField(blank=True)
+    
+    # Permission tracking
+    scopes = models.JSONField(default=list)  # Granted scopes/permissions
+    
+    # Usage tracking (free tier limits)
+    api_calls_made = models.IntegerField(default=0)
+    api_calls_limit = models.IntegerField(default=1000)  # Free tier: 1000/month
+    last_reset_date = models.DateTimeField(auto_now_add=True)
+    
+    # Timestamps
+    connected_at = models.DateTimeField(auto_now_add=True)
+    last_synced = models.DateTimeField(null=True, blank=True)
+    last_token_refreshed = models.DateTimeField(null=True, blank=True)
+    
+    class Meta:
+        unique_together = ('user', 'platform', 'account_id')
+        indexes = [
+            models.Index(fields=['user', 'platform']),
+            models.Index(fields=['token_expiry']),
+        ]
+    
+    def __str__(self):
+        return f"{self.user.username} - {self.platform} ({self.account_name})"
+    
+    def is_token_expired(self):
+        """Check if token is expired"""
+        return timezone.now() >= self.token_expiry
+    
+    def days_until_expiry(self):
+        """Return days remaining before token expires"""
+        if self.is_token_expired():
+            return 0
+        delta = self.token_expiry - timezone.now()
+        return delta.days
+    
+    def api_quota_exceeded(self):
+        """Check if API quota exceeded"""
+        return self.api_calls_made >= self.api_calls_limit
+    
+    def get_usage_percentage(self):
+        """Get API usage as percentage"""
+        return (self.api_calls_made / self.api_calls_limit) * 100 if self.api_calls_limit > 0 else 0
 
 class Platform(models.Model):
     PLATFORM_CHOICES = [

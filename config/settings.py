@@ -12,6 +12,7 @@ CORS_ALLOW_ALL_ORIGINS = True
 CORS_ALLOW_CREDENTIALS = True
 CSRF_TRUSTED_ORIGINS = [
     "http://localhost:3000",
+    "http://localhost:8000",
 ]
 INSTALLED_APPS = [
     "django.contrib.admin",
@@ -128,6 +129,18 @@ TWITTER_API_KEY = config("TWITTER_API_KEY", default="")
 TWITTER_API_SECRET = config("TWITTER_API_SECRET", default="")
 LINKEDIN_CLIENT_ID = config("LINKEDIN_CLIENT_ID", default="")
 LINKEDIN_CLIENT_SECRET = config("LINKEDIN_CLIENT_SECRET", default="")
+FACEBOOK_API_VERSION = config('FACEBOOK_API_VERSION', 'v19.0')
+FACEBOOK_REDIRECT_URI = config('FACEBOOK_REDIRECT_URI', 'http://localhost:3000/api/platform/oauth/callback/')
+
+# Twitter (X) API v2 OAuth settings
+TWITTER_APP_ID = config("TWITTER_APP_ID", default="")
+TWITTER_APP_SECRET = config("TWITTER_APP_SECRET", default="")
+TWITTER_REDIRECT_URI = config("TWITTER_REDIRECT_URI", default="http://localhost:3000/api/platform/oauth/callback/twitter")
+TWITTER_API_VERSION = "v2"
+
+# System pre-configured Meta credentials (for system-connect feature)
+FACEBOOK_PAGE_ID = config("FACEBOOK_PAGE_ID", default="")
+FACEBOOK_PAGE_ACCESS_TOKEN = config("FACEBOOK_PAGE_ACCESS_TOKEN", default="")
 
 
 # KAFKA CONFIG
