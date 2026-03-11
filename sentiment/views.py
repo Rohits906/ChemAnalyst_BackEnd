@@ -11,6 +11,7 @@ from datetime import datetime, timedelta
 from .models import SentimentPost, User_Keyword, Sentiment
 from .serializers import UserKeywordSerializer, UserSentimentSerializer
 from .producers import add_to_sentiment_quene
+from platforms.models import UserSocialAccount
 
 
 class SentimentDashboardView(APIView):
@@ -125,162 +126,243 @@ class SocialMediaSearchView(APIView):
     permission_classes = [IsAuthenticated]
 
     def _fetch_instagram(self, keyword, hours=None):
-        if (
-            not settings.INSTAGRAM_ACCESS_TOKEN
-            or not settings.INSTAGRAM_BUSINESS_ACCOUNT_ID
-        ):
-            print(f"Instagram credentials missing - ACCESS_TOKEN: {bool(settings.INSTAGRAM_ACCESS_TOKEN)}, ACCOUNT_ID: {bool(settings.INSTAGRAM_BUSINESS_ACCOUNT_ID)}")
-            return []
-
+        """Fetch Instagram posts from user's connected accounts or .env credentials"""
         posts = []
-        seen_ids = set()
-
-        # Strip leading/trailing # from keyword if present
-        clean_keyword = keyword.strip().lstrip('#').rstrip('#')
+        all_accounts = []
         
-        # Try multiple hashtag variations
-        hashtag_variations = [
-            clean_keyword.replace(" ", "").lower(),  # Remove spaces
-            clean_keyword.lower(),  # Keep spaces converted to lowercase
-            clean_keyword.replace(" ", "_").lower(),  # Underscores
-        ]
-
-        for hashtag in hashtag_variations:
-            search_url = "https://graph.facebook.com/v22.0/ig_hashtag_search"
-            params = {
-                "user_id": settings.INSTAGRAM_BUSINESS_ACCOUNT_ID,
-                "q": hashtag,
-                "access_token": settings.INSTAGRAM_ACCESS_TOKEN,
-            }
-
-            try:
-                print(f"Searching Instagram hashtag: #{hashtag}")
-                response = requests.get(search_url, params=params)
-                data = response.json()
-                
-                # Check for API errors
-                if "error" in data:
-                    print(f"Instagram API error for hashtag #{hashtag}: {data.get('error', {}).get('message')}")
-                    continue
-                    
-                if "data" not in data or not data["data"]:
-                    print(f"No hashtag found for: #{hashtag}")
-                    continue
-                    
-                hashtag_id = data["data"][0]["id"]
-                print(f"Found hashtag ID: {hashtag_id}")
-
-                # Fetch media from hashtag
-                for endpoint in ["recent_media", "top_media"]:
-                    media_url = f"https://graph.facebook.com/v22.0/{hashtag_id}/{endpoint}"
-                    media_params = {
-                        "user_id": settings.INSTAGRAM_BUSINESS_ACCOUNT_ID,
-                        "fields": "id,caption,media_type,media_url,permalink,timestamp,username,like_count,comments_count",
-                        "limit": 50,
-                        "access_token": settings.INSTAGRAM_ACCESS_TOKEN,
-                    }
-                    media_response = requests.get(media_url, params=media_params)
-                    media_data = media_response.json()
-                    
-                    if "error" in media_data:
-                        print(f"Instagram media fetch error for {endpoint}: {media_data.get('error', {}).get('message')}")
-                        continue
-                        
-                    if "data" in media_data:
-                        fetched_count = 0
-                        for item in media_data["data"]:
-                            if item["id"] not in seen_ids:
-                                posts.append(item)
-                                seen_ids.add(item["id"])
-                                fetched_count += 1
-                        print(f"Fetched {fetched_count} posts from {endpoint}")
-                
-                # If we found posts, return them
-                if posts:
-                    print(f"Total Instagram posts found: {len(posts)}")
-                    return posts
-                    
-            except Exception as e:
-                print(f"Instagram fetch error for hashtag #{hashtag}: {str(e)}")
-                continue
+        # Step 1: Try to get user's connected Instagram accounts from database
+        if hasattr(self, 'request') and self.request.user.is_authenticated:
+            user_accounts = UserSocialAccount.objects.filter(
+                user=self.request.user,
+                platform__in=['instagram', 'instagram_business'],
+                is_token_valid=True
+            ).exclude(access_token__isnull=True)
+            
+            if user_accounts.exists():
+                print(f"🔐 [INSTAGRAM] Found {user_accounts.count()} connected account(s) for user: {self.request.user.username}")
+                all_accounts = list(user_accounts)
+            else:
+                print(f"ℹ️ [INSTAGRAM] No connected accounts for {self.request.user.username}, checking .env credentials...")
         
-        print(f"No Instagram posts found for keyword: {keyword}")
-        return posts
-
-    def _fetch_facebook(self, keyword, hours=None):
-        """Fetch Facebook posts by keyword using Meta Graph API"""
-        if (
-            not settings.FACEBOOK_PAGE_ACCESS_TOKEN
-            or not settings.FACEBOOK_PAGE_ID
-        ):
-            print(f"Facebook credentials missing - PAGE_TOKEN: {bool(settings.FACEBOOK_PAGE_ACCESS_TOKEN)}, PAGE_ID: {bool(settings.FACEBOOK_PAGE_ID)}")
-            return []
-
-        posts = []
-        try:
-            # Search for posts on the Facebook page containing the keyword
-            search_url = f"https://graph.facebook.com/v22.0/{settings.FACEBOOK_PAGE_ID}/feed"
-            params = {
-                "fields": "id,message,story,created_time,type,permalink_url,likes.limit(0).summary(total_count),comments.limit(0).summary(total_count),shares.limit(0).summary(total_count)",
-                "limit": 100,
-                "access_token": settings.FACEBOOK_PAGE_ACCESS_TOKEN,
-            }
-
-            # Optional: add time-based filter
-            if hours:
-                try:
-                    hours_int = int(hours)
-                    time_threshold = timezone.now() - timedelta(hours=hours_int)
-                    # Facebook API uses since and until parameters (Unix timestamps)
-                    params["since"] = int(time_threshold.timestamp())
-                except ValueError:
-                    pass
-
-            print(f"Fetching Facebook posts for keyword: {keyword}")
-            response = requests.get(search_url, params=params)
-            data = response.json()
-
-            # Check for API errors
-            if "error" in data:
-                print(f"Facebook API error: {data.get('error', {}).get('message')}")
+        # Step 2: If no user accounts, fall back to .env credentials (backward compatibility)
+        if not all_accounts:
+            if not settings.INSTAGRAM_ACCESS_TOKEN or not settings.INSTAGRAM_BUSINESS_ACCOUNT_ID:
+                print(f"❌ [INSTAGRAM] No credentials available - User accounts: None, .env ACCESS_TOKEN: {bool(settings.INSTAGRAM_ACCESS_TOKEN)}, ACCOUNT_ID: {bool(settings.INSTAGRAM_BUSINESS_ACCOUNT_ID)}")
                 return []
-
-            fetched_count = 0
-            if "data" in data:
-                for item in data.get("data", []):
-                    # Check in multiple fields for the keyword
-                    message = item.get("message", "") or item.get("story", "")
-                    attachments_desc = ""
-                    attachments_title = ""
+            
+            # Create a fake account object for .env credentials
+            class EnvAccount:
+                def __init__(self):
+                    self.access_token = settings.INSTAGRAM_ACCESS_TOKEN
+                    self.account_id = settings.INSTAGRAM_BUSINESS_ACCOUNT_ID
+                    self.account_name = "System Instagram Business Account"
+            
+            all_accounts = [EnvAccount()]
+            print(f"🔄 [INSTAGRAM] Using system credentials from .env for account: {settings.INSTAGRAM_BUSINESS_ACCOUNT_ID}")
+        
+        # Step 3: Fetch posts from all connected accounts
+        try:
+            api_version = getattr(settings, 'FACEBOOK_API_VERSION', 'v19.0')
+            seen_ids = set()
+            clean_keyword = keyword.strip().lstrip('#').rstrip('#')
+            
+            for account in all_accounts:
+                try:
+                    print(f"📝 [INSTAGRAM] Fetching posts from: {account.account_name if hasattr(account, 'account_name') else account.account_id}")
                     
-                    # Check attachments for keyword as well
-                    attachments = item.get("attachments", {}).get("data", [])
-                    if attachments:
-                        for attachment in attachments:
-                            attachments_desc += attachment.get("description", "") or ""
-                            attachments_title += attachment.get("title", "") or ""
+                    # Try multiple hashtag variations
+                    hashtag_variations = [
+                        clean_keyword.replace(" ", "").lower(),
+                        clean_keyword.lower(),
+                        clean_keyword.replace(" ", "_").lower(),
+                    ]
                     
-                    # Search in all these fields
-                    search_text = (message + attachments_desc + attachments_title).lower()
+                    account_posts_found = False
                     
-                    if keyword.lower() in search_text:
-                        posts.append({
-                            "id": item.get("id"),
-                            "message": message,
-                            "created_time": item.get("created_time"),
-                            "type": item.get("type"),
-                            "permalink_url": item.get("permalink_url"),
-                            "likes": item.get("likes", {}).get("summary", {}).get("total_count", 0),
-                            "comments": item.get("comments", {}).get("summary", {}).get("total_count", 0),
-                            "shares": item.get("shares", {}).get("summary", {}).get("total_count", 0),
-                        })
-                        fetched_count += 1
+                    for hashtag in hashtag_variations:
+                        search_url = f"https://graph.facebook.com/{api_version}/ig_hashtag_search"
+                        params = {
+                            "user_id": account.account_id,
+                            "q": hashtag,
+                            "access_token": account.access_token,
+                        }
+                        
+                        try:
+                            response = requests.get(search_url, params=params, timeout=10)
+                            data = response.json()
+                            
+                            if "error" in data:
+                                continue
+                            
+                            if "data" not in data or not data["data"]:
+                                continue
+                            
+                            hashtag_id = data["data"][0]["id"]
+                            
+                            # Fetch media from hashtag
+                            for endpoint in ["recent_media", "top_media"]:
+                                media_url = f"https://graph.facebook.com/{api_version}/{hashtag_id}/{endpoint}"
+                                media_params = {
+                                    "user_id": account.account_id,
+                                    "fields": "id,caption,media_type,media_url,permalink,timestamp,username,like_count,comments_count",
+                                    "limit": 50,
+                                    "access_token": account.access_token,
+                                }
+                                
+                                media_response = requests.get(media_url, params=media_params, timeout=10)
+                                media_data = media_response.json()
+                                
+                                if "error" in media_data:
+                                    continue
+                                
+                                fetched_count = 0
+                                for item in media_data.get("data", []):
+                                    if item.get("id") in seen_ids:
+                                        continue
+                                    
+                                    caption = item.get("caption", "")
+                                    if keyword.lower() in caption.lower() or keyword.lower() in (item.get("username", "")).lower():
+                                        posts.append({
+                                            "id": item.get("id"),
+                                            "caption": caption,
+                                            "media_type": item.get("media_type"),
+                                            "media_url": item.get("media_url"),
+                                            "permalink": item.get("permalink"),
+                                            "timestamp": item.get("timestamp"),
+                                            "username": item.get("username"),
+                                            "like_count": item.get("like_count", 0),
+                                            "comments_count": item.get("comments_count", 0),
+                                        })
+                                        seen_ids.add(item.get("id"))
+                                        fetched_count += 1
+                                
+                                if fetched_count > 0:
+                                    print(f"✅ [INSTAGRAM] Found {fetched_count} posts from {endpoint}")
+                                    account_posts_found = True
+                            
+                            if account_posts_found:
+                                break
+                        
+                        except Exception as e:
+                            print(f"⚠️ [INSTAGRAM] Error searching hashtag #{hashtag}: {str(e)}")
+                            continue
+                    
+                    if not account_posts_found:
+                        print(f"ℹ️ [INSTAGRAM] No posts found for keyword '{keyword}' in this account")
                 
-            print(f"Found {fetched_count} Facebook posts for keyword: {keyword}")
+                except Exception as e:
+                    print(f"⚠️ [INSTAGRAM] Error fetching from account {account.account_id}: {str(e)}")
+                    continue
+            
+            print(f"📊 [INSTAGRAM] Total posts found: {len(posts)}")
             return posts
             
         except Exception as e:
-            print(f"Facebook fetch error: {str(e)}")
+            print(f"❌ [INSTAGRAM] Fetch error: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return []
+
+    def _fetch_facebook(self, keyword, hours=None):
+        """Fetch Facebook posts by keyword from user's connected accounts or .env credentials"""
+        posts = []
+        all_accounts = []
+        
+        # Step 1: Try to get user's connected Facebook accounts from database
+        if hasattr(self, 'request') and self.request.user.is_authenticated:
+            user_accounts = UserSocialAccount.objects.filter(
+                user=self.request.user,
+                platform__in=['facebook', 'facebook_page'],
+                is_token_valid=True
+            ).exclude(access_token__isnull=True)
+            
+            if user_accounts.exists():
+                print(f"🔐 [FACEBOOK] Found {user_accounts.count()} connected account(s) for user: {self.request.user.username}")
+                all_accounts = list(user_accounts)
+            else:
+                print(f"ℹ️ [FACEBOOK] No connected accounts for {self.request.user.username}, checking .env credentials...")
+        
+        # Step 2: If no user accounts, fall back to .env credentials (backward compatibility)
+        if not all_accounts:
+            if not settings.FACEBOOK_PAGE_ACCESS_TOKEN or not settings.FACEBOOK_PAGE_ID:
+                print(f"❌ [FACEBOOK] No credentials available - User accounts: None, .env PAGE_TOKEN: {bool(settings.FACEBOOK_PAGE_ACCESS_TOKEN)}, PAGE_ID: {bool(settings.FACEBOOK_PAGE_ID)}")
+                return []
+            
+            # Create a fake account object for .env credentials
+            class EnvAccount:
+                def __init__(self):
+                    self.access_token = settings.FACEBOOK_PAGE_ACCESS_TOKEN
+                    self.account_id = settings.FACEBOOK_PAGE_ID
+                    self.account_name = "System Facebook Page"
+            
+            all_accounts = [EnvAccount()]
+            print(f"🔄 [FACEBOOK] Using system credentials from .env for page: {settings.FACEBOOK_PAGE_ID}")
+        
+        # Step 3: Fetch posts from all connected accounts
+        try:
+            api_version = getattr(settings, 'FACEBOOK_API_VERSION', 'v19.0')
+            seen_ids = set()
+            
+            for account in all_accounts:
+                try:
+                    print(f"📝 [FACEBOOK] Fetching posts from: {account.account_name if hasattr(account, 'account_name') else account.account_id}")
+                    
+                    search_url = f"https://graph.facebook.com/{api_version}/{account.account_id}/posts"
+                    params = {
+                        "fields": "id,message,created_time,type,permalink_url,likes.summary(true).limit(0),comments.summary(true).limit(0),shares",
+                        "limit": 100,
+                        "access_token": account.access_token,
+                    }
+                    
+                    if hours:
+                        try:
+                            hours_int = int(hours)
+                            time_threshold = timezone.now() - timedelta(hours=hours_int)
+                            params["since"] = int(time_threshold.timestamp())
+                        except ValueError:
+                            pass
+                    
+                    response = requests.get(search_url, params=params, timeout=10)
+                    data = response.json()
+                    
+                    if "error" in data:
+                        error_msg = data.get('error', {}).get('message', 'Unknown error')
+                        print(f"❌ [FACEBOOK] API Error: {error_msg}")
+                        continue
+                    
+                    fetched_count = 0
+                    for item in data.get("data", []):
+                        if item.get("id") in seen_ids:
+                            continue
+                        
+                        message = item.get("message", "") or item.get("story", "")
+                        search_text = message.lower()
+                        
+                        if keyword.lower() in search_text:
+                            posts.append({
+                                "id": item.get("id"),
+                                "message": message,
+                                "created_time": item.get("created_time"),
+                                "type": item.get("type"),
+                                "permalink_url": item.get("permalink_url"),
+                                "likes": item.get("likes", {}).get("summary", {}).get("total_count", 0),
+                                "comments": item.get("comments", {}).get("summary", {}).get("total_count", 0),
+                                "shares": item.get("shares", {}).get("summary", {}).get("total_count", 0),
+                            })
+                            seen_ids.add(item.get("id"))
+                            fetched_count += 1
+                    
+                    print(f"✅ [FACEBOOK] Found {fetched_count} posts matching '{keyword}' from this account")
+                    
+                except Exception as e:
+                    print(f"⚠️ [FACEBOOK] Error fetching from account {account.account_id}: {str(e)}")
+                    continue
+            
+            print(f"📊 [FACEBOOK] Total posts found: {len(posts)}")
+            return posts
+            
+        except Exception as e:
+            print(f"❌ [FACEBOOK] Fetch error: {str(e)}")
             import traceback
             traceback.print_exc()
             return []
