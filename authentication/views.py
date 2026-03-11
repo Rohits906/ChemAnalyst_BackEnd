@@ -10,7 +10,8 @@ from .serializers import (
     SecurityQuestionSerializer, 
     CustomTokenObtainPairSerializer,
     AccountMemberSerializer,
-    RoleSerializer
+    RoleSerializer,
+    AvatarUploadSerializer
 )
 from .models import Account, SecurityQuestion, UserSecurityAnswer, AccountMember, Role
 from django.db.models import Q
@@ -233,7 +234,8 @@ class ProfileView(APIView):
             "theme": account.theme if account else "light",
             "timezone": account.timezone if account else "UTC",
             "two_factor_enabled": account.two_factor_enabled if account else False,
-            "security_questions_set": security_questions_set
+            "security_questions_set": security_questions_set,
+            "avatar": request.build_absolute_uri(account.avatar.url) if account and account.avatar else None
         }
         return Response({"success": True, "data": user_data}, status=status.HTTP_200_OK)
 
@@ -588,7 +590,7 @@ class InviteMemberView(APIView):
         temp_password = None
         
         try:
-            target_user = User.objects.get(email=email)
+            target_user = User.objects.get(email__iexact=email)
         except User.DoesNotExist:
             # Create a new user with placeholder details
             is_new_user = True
@@ -611,24 +613,39 @@ class InviteMemberView(APIView):
             )
 
         # 3. Check if already a member
-        if AccountMember.objects.filter(account=account, user=target_user).exists():
-            return Response({"success": False, "message": "User is already a member of this account."}, status=400)
+        member = AccountMember.objects.filter(account=account, user=target_user).first()
+        
+        if member:
+            if member.is_accepted:
+                return Response({"success": False, "message": "User is already an active member of this account."}, status=400)
+            
+            # If already invited but not accepted, we "resend" by updating the role and token
+            try:
+                role = Role.objects.get(id=role_id)
+            except Role.DoesNotExist:
+                return Response({"success": False, "message": "Invalid role selected."}, status=400)
+                
+            member.role = role
+            token = uuid.uuid4().hex
+            member.invitation_token = token
+            member.save()
+            print(f"DEBUG: Resending invitation to {email} with new token {token}")
+        else:
+            # 4. Get Role
+            try:
+                role = Role.objects.get(id=role_id)
+            except Role.DoesNotExist:
+                return Response({"success": False, "message": "Invalid role selected."}, status=400)
 
-        # 4. Get Role
-        try:
-            role = Role.objects.get(id=role_id)
-        except Role.DoesNotExist:
-            return Response({"success": False, "message": "Invalid role selected."}, status=400)
-
-        # 5. Create membership with token
-        token = uuid.uuid4().hex
-        AccountMember.objects.create(
-            account=account, 
-            user=target_user, 
-            role=role,
-            is_accepted=False,
-            invitation_token=token
-        )
+            # 5. Create membership with token
+            token = uuid.uuid4().hex
+            AccountMember.objects.create(
+                account=account, 
+                user=target_user, 
+                role=role,
+                is_accepted=False,
+                invitation_token=token
+            )
         
         # 6. Send Email Notification with Frontend Link
         frontend_url = getattr(settings, 'FRONTEND_URL', 'http://localhost:3000')
@@ -740,3 +757,41 @@ class ProcessInvitationView(APIView):
 
         except AccountMember.DoesNotExist:
             return Response({"success": False, "message": "Invitation not found or already processed."}, status=404)
+
+class AvatarUploadView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        print(f"DEBUG: Avatar upload request received for user {request.user}")
+        user = request.user
+        account, _ = Account.objects.get_or_create(account_owner=user, defaults={'name': user.username})
+        
+        if 'avatar' not in request.FILES:
+            print("DEBUG: No 'avatar' in request.FILES")
+            return Response({"success": False, "message": "No image provided"}, status=status.HTTP_400_BAD_REQUEST)
+
+        print(f"DEBUG: Received file: {request.FILES['avatar'].name}, Size: {request.FILES['avatar'].size}")
+
+        # Delete old avatar if it exists
+        if account.avatar:
+            try:
+                account.avatar.delete(save=False)
+                print("DEBUG: Deleted old avatar")
+            except Exception as e:
+                print(f"DEBUG: Error deleting old avatar: {e}")
+
+        try:
+            account.avatar = request.FILES['avatar']
+            account.save()
+            print("DEBUG: Avatar saved successfully")
+        except Exception as e:
+            print(f"DEBUG: Error saving avatar: {e}")
+            return Response({"success": False, "message": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        avatar_url = request.build_absolute_uri(account.avatar.url)
+        print(f"DEBUG: Returning avatar URL: {avatar_url}")
+        return Response({
+            "success": True, 
+            "message": "Avatar uploaded successfully",
+            "data": {"avatar": avatar_url}
+        })

@@ -87,8 +87,14 @@ USE_I18N = True
 
 USE_TZ = True
 
+
+# Static files (CSS, JavaScript, Images)
 STATIC_URL = "static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
+
+# Media files (Uploaded by users)
+MEDIA_URL = "/media/"
+MEDIA_ROOT = BASE_DIR / "media"
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
@@ -107,6 +113,8 @@ INSTAGRAM_ACCESS_TOKEN = config("INSTAGRAM_ACCESS_TOKEN", default="")
 INSTAGRAM_BUSINESS_ACCOUNT_ID = config("INSTAGRAM_BUSINESS_ACCOUNT_ID", default="")
 YOUTUBE_API_KEY = config("YOUTUBE_API_KEY", default="")
 TWITTER_BEARER_TOKEN = config("TWITTER_BEARER_TOKEN", default="")
+FACEBOOK_PAGE_ACCESS_TOKEN = config("FACEBOOK_PAGE_ACCESS_TOKEN", default="")
+FACEBOOK_PAGE_ID = config("FACEBOOK_PAGE_ID", default="")
 
 # frontend url used by OAuth callbacks
 FRONTEND_URL = config("FRONTEND_URL", default="http://localhost:3000")
