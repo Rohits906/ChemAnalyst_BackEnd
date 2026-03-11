@@ -10,7 +10,7 @@ os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings")
 django.setup()
 
 from django.conf import settings
-from platforms.models import Platform, ChannelStats, ChannelPost, PlatformFetchTask
+from platforms.models import Platform, ChannelStats, ChannelPost, PlatformFetchTask, UserSocialAccount
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 
@@ -25,11 +25,37 @@ youtube = build("youtube", "v3", developerKey=YOUTUBE_API_KEY) if YOUTUBE_API_KE
 from platforms.youtube_service import fetch_youtube_channel_data
 
 def fetch_instagram_data(account_id, platform_obj):
-    """Fetch Instagram data using meta_services"""
+    """Fetch Instagram data using meta_services and user's connected account token"""
     try:
         from platforms.meta_services import InstagramService
-        service = InstagramService(platform_obj)
         
+        # Step 1: Get the user's connected Instagram account (from OAuth)
+        user_ig_account = UserSocialAccount.objects.filter(
+            user=platform_obj.user,
+            platform__in=['instagram', 'instagram_business'],
+            is_token_valid=True
+        ).first()
+        
+        if not user_ig_account:
+            logger.error(f"No valid Instagram account token found for user {platform_obj.user}")
+            return False
+        
+        # Step 2: Use the OAuth token for API calls
+        access_token = user_ig_account.access_token
+        
+        logger.info(f"🔐 Using OAuth token for {platform_obj.user.username}")
+        
+        # Update Platform metadata with token for future use
+        platform_obj.metadata['access_token'] = access_token
+        platform_obj.metadata['token_source'] = 'oauth'
+        platform_obj.save()
+        
+        # Step 3: Create service with the token
+        service = InstagramService(platform_obj)
+        # Override the service's token with our OAuth token
+        service.access_token = access_token
+        
+        logger.info(f"📝 Fetching Instagram channel info for {account_id}")
         # Fetch channel info
         channel_info = service.fetch_channel_info()
         if channel_info:
@@ -37,8 +63,10 @@ def fetch_instagram_data(account_id, platform_obj):
             platform_obj.profile_picture = channel_info.get('profile_picture', '')
             platform_obj.save()
             
+            logger.info(f"✅ Channel info fetched: {platform_obj.channel_name}")
+            
             # Create stats
-            ChannelStats.objects.create(
+            stats = ChannelStats.objects.create(
                 platform=platform_obj,
                 followers=channel_info.get('followers', 0),
                 posts_count=channel_info.get('posts_count', 0),
@@ -46,9 +74,12 @@ def fetch_instagram_data(account_id, platform_obj):
                 period_end=timezone.now() + timedelta(days=1),
                 collected_at=timezone.now(),
             )
+            logger.info(f"✅ Stats created: {stats.followers} followers, {stats.posts_count} posts")
         
         # Fetch posts
+        logger.info(f"📝 Fetching Instagram posts for {account_id}")
         posts = service.fetch_posts(limit=15)
+        posts_created = 0
         for post_data in posts:
             ChannelPost.objects.update_or_create(
                 platform=platform_obj,
@@ -67,20 +98,48 @@ def fetch_instagram_data(account_id, platform_obj):
                     'collected_at': timezone.now(),
                 }
             )
+            posts_created += 1
         
-        logger.info(f"Instagram data fetched successfully for {account_id}")
+        logger.info(f"✅ Instagram data fetched successfully for {account_id} - {posts_created} posts")
         return True
     except Exception as e:
-        logger.error(f"Error fetching Instagram data: {e}", exc_info=True)
+        logger.error(f"❌ Error fetching Instagram data: {e}", exc_info=True)
         return False
 
 
 def fetch_facebook_data(page_id, platform_obj):
-    """Fetch Facebook data using meta_services"""
+    """Fetch Facebook data using meta_services and user's connected account token"""
     try:
         from platforms.meta_services import FacebookService
-        service = FacebookService(platform_obj)
         
+        # Step 1: Get the user's connected Facebook account (from OAuth)
+        user_fb_account = UserSocialAccount.objects.filter(
+            user=platform_obj.user,
+            platform__in=['facebook', 'facebook_page'],
+            is_token_valid=True
+        ).first()
+        
+        if not user_fb_account:
+            logger.error(f"No valid Facebook account token found for user {platform_obj.user}")
+            return False
+        
+        # Step 2: Use the OAuth token for API calls
+        access_token = user_fb_account.access_token
+        
+        logger.info(f"🔐 Using OAuth token for {platform_obj.user.username}")
+        print(f"🔐 Using OAuth token for {platform_obj.user.username} - Token first 50 chars: {access_token[:50]}...")
+        
+        # Update Platform metadata with token for future use
+        platform_obj.metadata['page_access_token'] = access_token
+        platform_obj.metadata['token_source'] = 'oauth'
+        platform_obj.save()
+        
+        # Step 3: Create service with the token
+        service = FacebookService(platform_obj)
+        # Override the service's token with our OAuth token
+        service.access_token = access_token
+        
+        logger.info(f"📝 Fetching Facebook channel info for {page_id}")
         # Fetch channel info
         channel_info = service.fetch_channel_info()
         if channel_info:
@@ -88,8 +147,10 @@ def fetch_facebook_data(page_id, platform_obj):
             platform_obj.profile_picture = channel_info.get('profile_picture', '')
             platform_obj.save()
             
+            logger.info(f"✅ Channel info fetched: {platform_obj.channel_name}")
+            
             # Create stats
-            ChannelStats.objects.create(
+            stats = ChannelStats.objects.create(
                 platform=platform_obj,
                 followers=channel_info.get('followers', 0),
                 posts_count=channel_info.get('posts_count', 0),
@@ -98,9 +159,12 @@ def fetch_facebook_data(page_id, platform_obj):
                 period_end=timezone.now() + timedelta(days=1),
                 collected_at=timezone.now(),
             )
+            logger.info(f"✅ Stats created: {stats.followers} followers, {stats.posts_count} posts")
         
         # Fetch posts
+        logger.info(f"📝 Fetching Facebook posts for {page_id}")
         posts = service.fetch_posts(limit=15)
+        posts_created = 0
         for post_data in posts:
             ChannelPost.objects.update_or_create(
                 platform=platform_obj,
@@ -119,11 +183,12 @@ def fetch_facebook_data(page_id, platform_obj):
                     'collected_at': timezone.now(),
                 }
             )
+            posts_created += 1
         
-        logger.info(f"Facebook data fetched successfully for {page_id}")
+        logger.info(f"✅ Facebook data fetched successfully for {page_id} - {posts_created} posts")
         return True
     except Exception as e:
-        logger.error(f"Error fetching Facebook data: {e}", exc_info=True)
+        logger.error(f"❌ Error fetching Facebook data: {e}", exc_info=True)
         return False
 
 

@@ -1,10 +1,23 @@
 from django.urls import path
 from . import views
+from .user_oauth_views import (
+     FacebookUserOAuthInitiateView,
+     FacebookUserOAuthCallbackView,
+     InstagramUserOAuthInitiateView,
+     InstagramUserOAuthCallbackView,
+     UserSocialAccountsView,
+)
 
 urlpatterns = [
     # OAuth endpoints - MUST come before generic patterns
     path('oauth/initiate/<str:platform>/', views.OAuthInitiateView.as_view(), name='platform-oauth-init'),
     path('oauth/callback/<str:platform>/', views.OAuthCallbackView.as_view(), name='platform-oauth-callback'),
+
+    path('oauth/facebook/initiate/', FacebookUserOAuthInitiateView.as_view(), name='facebook-user-oauth-init'),
+    path('oauth/facebook/callback/', FacebookUserOAuthCallbackView.as_view(), name='facebook-user-oauth-callback'),
+    path('oauth/instagram/initiate/', InstagramUserOAuthInitiateView.as_view(), name='instagram-user-oauth-init'),
+    path('oauth/instagram/callback/', InstagramUserOAuthCallbackView.as_view(), name='instagram-user-oauth-callback'),
+    path('accounts/', UserSocialAccountsView.as_view(), name='user-social-accounts'),
     
     # Twitter-specific OAuth endpoints
     path('oauth/initiate/twitter/', views.TwitterOAuthInitiateView.as_view(), name='twitter-oauth-init'),

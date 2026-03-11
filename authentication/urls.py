@@ -5,7 +5,8 @@ from .views import (
     Enable2FAView, Verify2FAView, Disable2FAView, LoginVerify2FAView, 
     SecurityQuestionListView, SetupSecurityQuestionsView, Check2FAStatusView,
     AccountMemberListView, AccountRoleListView, UpdateMemberRoleView, RemoveMemberView,
-    InviteMemberView, AcceptInvitationView, InvitationDetailView, ProcessInvitationView
+    InviteMemberView, AcceptInvitationView, InvitationDetailView, ProcessInvitationView,
+    AvatarUploadView
 )
 
 urlpatterns = [
@@ -14,6 +15,7 @@ urlpatterns = [
     path("logout/", LogoutView.as_view(), name="logout"),
     path("verify/", VerifyAuth.as_view(), name="verifyauth"),
     path("profile/", ProfileView.as_view(), name="profile"),
+    path("avatar-upload/", AvatarUploadView.as_view(), name="avatar-upload"),
     path("change-password/", ChangePasswordView.as_view(), name="change-password"),
     path("delete/", DeleteAccountView.as_view(), name="delete-account"),
     path("deactivate/", DeactivateAccountView.as_view(), name="deactivate-account"),

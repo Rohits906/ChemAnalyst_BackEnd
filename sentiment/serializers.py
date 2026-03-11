@@ -23,6 +23,11 @@ class UserSentimentSerializer(serializers.ModelSerializer):
     published_at = serializers.DateTimeField(source='post.published_at', default=None)
     platform_post_id = serializers.CharField(source='post.platform_post_id', default='')
 
+    location_name = serializers.CharField(source='post.location_name', default='Global')
+    latitude = serializers.FloatField(source='post.latitude', default=None)
+    longitude = serializers.FloatField(source='post.longitude', default=None)
+    location_type = serializers.CharField(source='post.location_type', default='city')
+
     class Meta:
         model = Sentiment
         fields = [
@@ -43,4 +48,8 @@ class UserSentimentSerializer(serializers.ModelSerializer):
             'comments',
             'shares',
             'published_at',
+            'location_name',
+            'latitude',
+            'longitude',
+            'location_type',
         ]
