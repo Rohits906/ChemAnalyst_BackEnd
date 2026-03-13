@@ -8,7 +8,7 @@ def contact_api(request):
     if request.method == "POST":
         try:
             data = json.loads(request.body)
-            print(data)
+
             name = data.get("name")
             email = data.get("email")
             message = data.get("message")
