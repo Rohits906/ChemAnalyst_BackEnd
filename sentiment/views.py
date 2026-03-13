@@ -1,17 +1,18 @@
 import requests
-import random
-import uuid
-from django.utils import timezone
+from decouple import config
 from django.conf import settings
 from django.http import JsonResponse
 from django.db.models import Count, Q
 from django.views.decorators.http import require_GET
+from django.utils import timezone
 from rest_framework.views import APIView
-from rest_framework.permissions import IsAuthenticated, AllowAny
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
+from datetime import datetime, timedelta
 from .models import SentimentPost, User_Keyword, Sentiment
 from .serializers import UserKeywordSerializer, UserSentimentSerializer
-from .producers import add_to_sentiment_queue
+from .producers import add_to_sentiment_quene
+from platforms.models import UserSocialAccount
 
 
 class SentimentDashboardView(APIView):
@@ -20,6 +21,7 @@ class SentimentDashboardView(APIView):
     def get(self, request):
         keyword = request.query_params.get("keyword")
         platform = request.query_params.get("platform")
+        hours = request.query_params.get("hours")
 
         # Get current user's keywords
         user_keywords = User_Keyword.objects.filter(user=request.user).values_list("keyword", flat=True)
@@ -42,6 +44,14 @@ class SentimentDashboardView(APIView):
         
         if platform:
             sentiments = sentiments.filter(post__platform__iexact=platform)
+
+        if hours:
+            try:
+                hours_int = int(hours)
+                time_threshold = timezone.now() - timedelta(hours=hours_int)
+                sentiments = sentiments.filter(post__published_at__gte=time_threshold)
+            except ValueError:
+                pass
 
         # BAR CHART DATA (Platform-wise)
         # We need to count positive/negative per platform
@@ -93,7 +103,7 @@ class SentimentDashboardView(APIView):
             )
 
         # RECENT POSTS
-        recent_sentiments = sentiments.order_by("-analyzed_at")[:1000]
+        recent_sentiments = sentiments.order_by("-analyzed_at")[:5]
         recent_posts = []
         for s in recent_sentiments:
             recent_posts.append({
@@ -103,57 +113,13 @@ class SentimentDashboardView(APIView):
                 "sentiment": s.sentiment_label,
                 "keyword": s.keyword,
                 "created_at": s.analyzed_at.strftime("%Y-%m-%d %H:%M:%S"),
-                "published_at": s.post.published_at.strftime("%Y-%m-%d %H:%M:%S") if s.post.published_at else None,
-                "location_name": s.post.location_name or "",
-                "latitude": s.post.latitude,
-                "longitude": s.post.longitude,
-                "post_url": s.post.post_url,
-                "post_title": s.post.post_title,
-                "author": s.post.author_name,
             })
-
-        # TOP ENGAGED POSTS (for TopLiveData component)
-        top_engaged_posts = sentiments.order_by("-post__likes", "-post__comments")[:5]
-        top_live_data = []
-        for s in top_engaged_posts:
-            top_live_data.append({
-                "id": str(s.id),
-                "link": s.post.post_url,
-                "platform": s.post.platform.title(),
-                "like": s.post.likes,
-                "comment": s.post.comments,
-                "shares": s.post.shares,
-            })
-
-        # PLATFORM STATS (Aggregate metrics)
-        from django.db.models import Sum
-        stats_aggregate = sentiments.aggregate(
-            total_posts=Count("id"),
-            total_likes=Sum("post__likes"),
-            total_comments=Sum("post__comments"),
-            total_shares=Sum("post__shares"),
-        )
-
-        def format_number(num):
-            if num is None: return "0"
-            if num >= 1000000: return f"{num/1000000:.1f}M"
-            if num >= 1000: return f"{num/1000:.1f}K"
-            return str(num)
-
-        platform_stats = [
-            {"label": "Post", "value": format_number(stats_aggregate["total_posts"])},
-            {"label": "Likes", "value": format_number(stats_aggregate["total_likes"])},
-            {"label": "Comment", "value": format_number(stats_aggregate["total_comments"])},
-            {"label": "Shares", "value": format_number(stats_aggregate["total_shares"])},
-        ]
 
         return Response({
             "bar": bar_data,
             "donut": donut_data,
             "cards": cards_data,
             "recentPosts": recent_posts,
-            "topEngagedPosts": top_live_data,
-            "platformStats": platform_stats,
         })
 
 
@@ -162,17 +128,12 @@ class SocialMediaSearchView(APIView):
 
     def _fetch_instagram(self, keyword):
         if (
-            not settings.INSTAGRAM_ACCESS_TOKEN
-            or not settings.INSTAGRAM_BUSINESS_ACCOUNT_ID
+            not getattr(settings, 'INSTAGRAM_ACCESS_TOKEN', None)
+            or not getattr(settings, 'INSTAGRAM_BUSINESS_ACCOUNT_ID', None)
         ):
             return []
 
-        from django.utils import timezone
-        from datetime import timedelta
-        # strictly 24 hours ago
-        time_threshold = timezone.now() - timedelta(hours=24)
-
-        hashtag = keyword.replace(" ", "").lower()
+        hashtag = keyword.replace(" ", "").replace("#", "").lower()
         search_url = "https://graph.facebook.com/v22.0/ig_hashtag_search"
         params = {
             "user_id": settings.INSTAGRAM_BUSINESS_ACCOUNT_ID,
@@ -181,185 +142,267 @@ class SocialMediaSearchView(APIView):
         }
 
         try:
-            print(f"Instagram search for hashtag: {hashtag}")
-            response = requests.get(search_url, params=params, timeout=10)
-            print(f"Instagram search status: {response.status_code}")
+            response = requests.get(search_url, params=params)
             data = response.json()
-            if "error" in data:
-                print(f"Instagram API Error: {data['error'].get('message')}")
             if "data" not in data or not data["data"]:
-                print("No hashtag ID found for keyword.")
                 return []
-            hashtag_id = data["data"][0]["id"]
-            print(f"Found hashtag ID: {hashtag_id}")
-
-            posts = []
+            
+            # Create a fake account object for .env credentials
+            class EnvAccount:
+                def __init__(self):
+                    self.access_token = settings.FACEBOOK_PAGE_ACCESS_TOKEN
+                    self.account_id = settings.FACEBOOK_PAGE_ID
+                    self.account_name = "System Facebook Page"
+            
+            all_accounts = [EnvAccount()]
+            print(f"🔄 [FACEBOOK] Using system credentials from .env for page: {settings.FACEBOOK_PAGE_ID}")
+        
+        # Step 3: Fetch posts from all connected accounts
+        try:
+            api_version = getattr(settings, 'FACEBOOK_API_VERSION', 'v19.0')
             seen_ids = set()
             for endpoint in ["recent_media", "top_media"]:
                 media_url = f"https://graph.facebook.com/v22.0/{hashtag_id}/{endpoint}"
                 media_params = {
                     "user_id": settings.INSTAGRAM_BUSINESS_ACCOUNT_ID,
-                    "fields": "id,caption,media_type,media_url,permalink,timestamp,location",
+                    "fields": "id,caption,media_type,media_url,permalink,timestamp,username",
                     "access_token": settings.INSTAGRAM_ACCESS_TOKEN,
                 }
-                media_response = requests.get(media_url, params=media_params, timeout=10)
-                print(f"Instagram {endpoint} status: {media_response.status_code}")
+                media_response = requests.get(media_url, params=media_params)
                 media_data = media_response.json()
-                if "error" in media_data:
-                    print(f"Instagram {endpoint} API Error: {media_data['error'].get('message')}")
                 if "data" in media_data:
-                    from dateutil import parser
                     for item in media_data["data"]:
-                        timestamp_str = item.get("timestamp")
-                        if timestamp_str:
-                            try:
-                                item_time = parser.isoparse(timestamp_str)
-                                if item_time < time_threshold:
-                                    continue # Skip older posts
-                            except Exception:
-                                pass
-
                         if item["id"] not in seen_ids:
                             posts.append(item)
                             seen_ids.add(item["id"])
-            print(f"Total Instagram posts found: {len(posts)}")
             return posts
+            
         except Exception as e:
-            print("error occured", e)
+            print(f"❌ [FACEBOOK] Fetch error: {str(e)}")
+            import traceback
+            traceback.print_exc()
             return []
 
-    def _fetch_youtube(self, keyword):
+    def _fetch_facebook(self, keyword, user=None):
+        """Fetch Facebook posts using:
+        1. Facebook Page Posts Search (all connected pages' feeds, filtered by keyword)
+        2. Instagram Hashtag Search via Graph API (also available with FB Business token)
+        Returns list of {id, text, created_at, author, permalink}
+        """
+        results = []
+        seen_ids = set()
+
+        # Gather all page tokens to try: from connected platforms + hardcoded fallback
+        page_tokens = []  # list of (page_id, access_token)
+
+        # 1. From DB-connected Facebook platforms for this user
+        if user:
+            try:
+                from platforms.models import Platform
+                fb_platforms = Platform.objects.filter(
+                    user=user, name="facebook", is_active=True
+                )
+                for fb_plat in fb_platforms:
+                    meta = fb_plat.metadata or {}
+                    token = meta.get("access_token") or meta.get("page_access_token")
+                    page_id = meta.get("page_id") or fb_plat.channel_id
+                    if token and page_id:
+                        page_tokens.append((page_id, token))
+            except Exception as e:
+                print(f"Could not load Facebook platforms from DB: {e}")
+
+        # 2. Fallback to .env credentials
+        env_token = getattr(settings, 'FACEBOOK_PAGE_ACCESS_TOKEN', config("FACEBOOK_PAGE_ACCESS_TOKEN", default=""))
+        env_page_id = getattr(settings, 'FACEBOOK_PAGE_ID', config("FACEBOOK_PAGE_ID", default=""))
+        if env_token and env_page_id:
+            page_tokens.append((env_page_id, env_token))
+
+        if not page_tokens:
+            print("Facebook: No page tokens available.")
+            return []
+
+        clean_kw = keyword.replace("#", "").strip()
+
+        for page_id, token in page_tokens:
+            # Strategy A: Search page feed for keyword (all posts, not just matching ones with text filter)
+            try:
+                url = f"https://graph.facebook.com/v22.0/{page_id}/feed"
+                params = {
+                    "access_token": token,
+                    "fields": "id,message,created_time,permalink_url,from,place",
+                    "limit": 50
+                }
+                resp = requests.get(url, params=params, timeout=10)
+                data = resp.json()
+                if "data" in data:
+                    for item in data["data"]:
+                        msg = item.get("message") or item.get("story", "")
+                        if not msg:
+                            continue
+                        # Include post if keyword appears in text (case-insensitive), or include all if no keyword
+                        if not clean_kw or clean_kw.lower() in msg.lower():
+                            post_id = item["id"]
+                            if post_id not in seen_ids:
+                                seen_ids.add(post_id)
+                                # Try to get location from 'place'
+                                place = item.get("place", {})
+                                location = place.get("name", "") if place else ""
+                                results.append({
+                                    "id": post_id,
+                                    "text": msg,
+                                    "created_at": item.get("created_time"),
+                                    "author": item.get("from", {}).get("name", "Page"),
+                                    "permalink": item.get("permalink_url", ""),
+                                    "location": location,
+                                })
+                elif "error" in data:
+                    print(f"Facebook feed error for page {page_id}: {data['error'].get('message')}")
+            except Exception as e:
+                print(f"Facebook feed fetch error: {e}")
+
+            # Strategy B: Use Graph API hashtag search (works with Business tokens)
+            try:
+                hashtag_url = "https://graph.facebook.com/v22.0/ig_hashtag_search"
+                hashtag_params = {
+                    "user_id": page_id,
+                    "q": clean_kw,
+                    "access_token": token,
+                }
+                ht_resp = requests.get(hashtag_url, params=hashtag_params, timeout=10)
+                ht_data = ht_resp.json()
+                if "data" in ht_data and ht_data["data"]:
+                    hashtag_id = ht_data["data"][0]["id"]
+                    for endpoint in ["recent_media", "top_media"]:
+                        media_url = f"https://graph.facebook.com/v22.0/{hashtag_id}/{endpoint}"
+                        media_params = {
+                            "user_id": page_id,
+                            "fields": "id,caption,permalink,timestamp,username,media_type",
+                            "access_token": token,
+                        }
+                        media_resp = requests.get(media_url, params=media_params, timeout=10)
+                        media_data = media_resp.json()
+                        if "data" in media_data:
+                            for item in media_data["data"]:
+                                post_id = f"fb_ht_{item['id']}"
+                                if post_id not in seen_ids:
+                                    seen_ids.add(post_id)
+                                    caption = item.get("caption", "") or ""
+                                    results.append({
+                                        "id": post_id,
+                                        "text": caption,
+                                        "created_at": item.get("timestamp"),
+                                        "author": item.get("username", "Facebook User"),
+                                        "permalink": item.get("permalink", ""),
+                                        "location": "",
+                                    })
+            except Exception as e:
+                print(f"Facebook hashtag search error: {e}")
+
+        print(f"Facebook: fetched {len(results)} posts for keyword '{keyword}'")
+        return results
+
+    def _fetch_youtube(self, keyword, hours=None):
         if not settings.YOUTUBE_API_KEY:
             return []
-        from django.utils import timezone
-        from datetime import timedelta
-        # strictly 24 hours ago
-        time_threshold = timezone.now() - timedelta(hours=24)
-        published_after_iso = time_threshold.strftime("%Y-%m-%dT%H:%M:%SZ")
-
         url = "https://www.googleapis.com/youtube/v3/search"
         params = {
             "part": "snippet",
             "q": keyword,
             "type": "video",
             "key": settings.YOUTUBE_API_KEY,
-            "maxResults": 50,
-            "publishedAfter": published_after_iso,
+            "maxResults": 50, # Increased max results for more data
         }
+        
+        if hours:
+            try:
+                hours_int = int(hours)
+                # YouTube API expects RFC 3339 formatted date-time with Z or offset
+                time_threshold = timezone.now() - timedelta(hours=hours_int)
+                params["publishedAfter"] = time_threshold.isoformat().replace("+00:00", "Z")
+            except ValueError:
+                pass
+
         try:
-            print(f"YouTube search for keyword: {keyword}")
-            response = requests.get(url, params=params, timeout=10)
-            print(f"YouTube status: {response.status_code}")
+            response = requests.get(url, params=params)
             data = response.json()
-            if "error" in data:
-                print(f"YouTube API Error: {data['error'].get('message')}")
             results = []
             if "items" in data:
-                video_ids = [item["id"]["videoId"] for item in data["items"] if item.get("id", {}).get("kind") == "youtube#video"]
-                
-                if video_ids:
-                    # Fetch detailed video info including recordingDetails (location)
-                    details_url = "https://www.googleapis.com/youtube/v3/videos"
-                    details_params = {
-                        "part": "snippet,recordingDetails",
-                        "id": ",".join(video_ids),
-                        "key": settings.YOUTUBE_API_KEY
-                    }
-                    details_response = requests.get(details_url, params=details_params, timeout=10)
-                    details_data = details_response.json()
-                    
-                    if "items" in details_data:
-                        for item in details_data["items"]:
-                            snippet = item["snippet"]
-                            rec_details = item.get("recordingDetails", {})
-                            location = rec_details.get("location", {})
-                            
-                            results.append(
-                                {
-                                    "id": item["id"],
-                                    "title": snippet["title"],
-                                    "description": snippet["description"],
-                                    "author": snippet["channelTitle"],
-                                    "published_at": snippet["publishedAt"],
-                                    "permalink": f"https://www.youtube.com/watch?v={item['id']}",
-                                    "location": {
-                                        "latitude": location.get("latitude"),
-                                        "longitude": location.get("longitude"),
-                                        "name": rec_details.get("locationDescription")
-                                    },
-                                    "extra_details": {
-                                        "thumbnails": snippet.get("thumbnails"),
-                                        "channelId": snippet.get("channelId"),
-                                    },
-                                }
-                            )
-            print(f"Total YouTube videos found: {len(results)}")
+                for item in data["items"]:
+                    # Ensure we only process items that are actually videos (contain videoId)
+                    if not item.get("id") or "videoId" not in item["id"]:
+                        continue
+                        
+                    snippet = item["snippet"]
+                    results.append(
+                        {
+                            "id": item["id"]["videoId"],
+                            "title": snippet["title"],
+                            "description": snippet["description"],
+                            "author": snippet["channelTitle"],
+                            "published_at": snippet["publishedAt"],
+                            "permalink": f"https://www.youtube.com/watch?v={item['id']['videoId']}",
+                            "extra_details": {
+                                "thumbnails": snippet.get("thumbnails"),
+                                "channelId": snippet.get("channelId"),
+                            },
+                        }
+                    )
+            else:
+                if "error" in data:
+                    print(f"YouTube API Error: {data['error'].get('message')}")
             return results
         except Exception as e:
             print("error occured", e)
             return []
 
-    def _fetch_twitter(self, keyword):
+    def _fetch_twitter(self, keyword, hours=None):
         if not settings.TWITTER_BEARER_TOKEN:
+            print("Twitter credentials missing - BEARER_TOKEN: False")
             return []
-        from django.utils import timezone
-        from datetime import timedelta
-        # strictly 24 hours ago
-        time_threshold = timezone.now() - timedelta(hours=24)
-        start_time_iso = time_threshold.strftime("%Y-%m-%dT%H:%M:%SZ")
-
         url = "https://api.twitter.com/2/tweets/search/recent"
         headers = {"Authorization": f"Bearer {settings.TWITTER_BEARER_TOKEN}"}
         # Added expansions and user.fields to get username
         params = {
             "query": keyword,
-            "tweet.fields": "created_at,text,author_id,geo",
-            "expansions": "author_id,geo.place_id",
+            "tweet.fields": "created_at,text,author_id",
+            "expansions": "author_id",
             "user.fields": "username,name",
-            "place.fields": "full_name,geo",
-            "max_results": 100,
-            "start_time": start_time_iso,
+            "max_results": 20, # Increased max results
         }
+        
+        if hours:
+            try:
+                hours_int = int(hours)
+                time_threshold = timezone.now() - timedelta(hours=hours_int)
+                params["start_time"] = time_threshold.strftime("%Y-%m-%dT%H:%M:%SZ")
+            except ValueError:
+                pass
+
         try:
-            print(f"Twitter search for keyword: {keyword}")
-            response = requests.get(url, headers=headers, params=params, timeout=10)
-            print(f"Twitter status: {response.status_code}")
-            
-            if response.status_code == 402:
-                print("Twitter API: Payment Required (likely plan limit hit). Returning empty results.")
-                return []
-                
+            print(f"Searching Twitter for keyword: {keyword}")
+            response = requests.get(url, headers=headers, params=params)
             data = response.json()
+            
+            # Check for API errors
             if "errors" in data:
-                print(f"Twitter API Errors: {data['errors']}")
+                error_msg = data.get("errors", [{}])[0].get("message", "Unknown error")
+                print(f"Twitter API error: {error_msg}")
+                return []
+            
             results = []
             
-            # Create a map for user data and place data
+            # Create a map for user data
             users_map = {}
-            places_map = {}
-            if "includes" in data:
-                if "users" in data["includes"]:
-                    for user in data["includes"]["users"]:
-                        users_map[user["id"]] = user["username"]
-                if "places" in data["includes"]:
-                    for place in data["includes"]["places"]:
-                        places_map[place["id"]] = place
+            if "includes" in data and "users" in data["includes"]:
+                for user in data["includes"]["users"]:
+                    users_map[user["id"]] = user["username"]
 
             if "data" in data:
+                fetched_count = len(data["data"])
+                print(f"Found {fetched_count} Twitter posts for keyword: {keyword}")
                 for item in data["data"]:
                     author_id = item.get("author_id")
                     username = users_map.get(author_id, "unknown")
-                    
-                    # Extract Geo if present
-                    geo_data = {}
-                    if "geo" in item and "place_id" in item["geo"]:
-                        place = places_map.get(item["geo"]["place_id"])
-                        if place:
-                            geo_data = {
-                                "full_name": place.get("full_name"),
-                                "coordinates": place.get("geo", {}).get("bbox", []) or place.get("geo", {}).get("coordinates", {}).get("coordinates", [])
-                            }
-
                     results.append(
                         {
                             "id": item["id"],
@@ -367,138 +410,40 @@ class SocialMediaSearchView(APIView):
                             "created_at": item.get("created_at"),
                             "author": username,
                             "permalink": f"https://twitter.com/{username}/status/{item['id']}",
-                            "geo": geo_data
                         }
                     )
-            print(f"Total Twitter tweets found: {len(results)}")
+            else:
+                print(f"No Twitter posts found for keyword: {keyword}")
             return results
         except Exception as e:
-            print("error occured", e)
+            print(f"Twitter fetch error: {str(e)}")
+            import traceback
+            traceback.print_exc()
             return []
 
-    def _extract_location(self, text, keyword, post_metadata=None):
-        """
-        Extract location prioritizing real API metadata, then falling back to text analysis.
-        """
-        # 1. Clean inputs
-        text_lower = text.lower() if text else ""
-        # Remove hashtags and trim for keyword matching
-        keyword_clean = keyword.lower().replace("#", "").strip() if keyword else ""
-
-        # 2. Check for real metadata (coordinates or location name)
-        if post_metadata:
-            # Twitter Geo
-            geo = post_metadata.get("geo")
-            if geo and geo.get("coordinates"):
-                coords = geo["coordinates"]
-                if isinstance(coords, list) and len(coords) >= 2:
-                    lng = (coords[0] + coords[2]) / 2 if len(coords) == 4 else coords[0]
-                    lat = (coords[1] + coords[3]) / 2 if len(coords) == 4 else coords[1]
-                    name = geo.get("full_name") or keyword_clean.title()
-                    return name, lat, lng
-            
-            # Instagram/Facebook Location name
-            if post_metadata.get("location"):
-                loc = post_metadata["location"]
-                if isinstance(loc, dict):
-                    # YouTube case (has direct coordinates)
-                    if loc.get("latitude") is not None:
-                        name = loc.get("name") or keyword_clean.title()
-                        return name, loc["latitude"], loc["longitude"]
-                    
-                    # Instagram case (has name only)
-                    if loc.get("name"):
-                        loc_name = loc["name"]
-                        loc_name_lower = loc_name.lower()
-                        for city, coords in self._get_cities().items():
-                            if city in loc_name_lower:
-                                return city.title(), coords[0], coords[1]
-                        return loc["name"], None, None
-
-        # 3. Fallback to city-based heuristic
-        cities = self._get_cities()
-        
-        # Check if keyword contains or is a city
-        for city, coords in cities.items():
-            if city in keyword_clean:
-                return city.title(), coords[0], coords[1]
-            
-        # Check if city is mentioned in text
-        for city, coords in cities.items():
-            if city in text_lower:
-                return city.title(), coords[0], coords[1]
-        
-        # 4. Final fallback: Return empty if no real location identified
-        return "", None, None
-
-    def _get_cities(self):
-        return {
-            # India
-            "delhi": (28.6139, 77.2090),
-            "दिल्ल्ली": (28.6139, 77.2090),
-            "नई दिल्ली": (28.6139, 77.2090),
-            "mumbai": (19.0760, 72.8777),
-            "मुंबई": (19.0760, 72.8777),
-            "bangalore": (12.9716, 77.5946),
-            "bengaluru": (12.9716, 77.5946),
-            "chennai": (13.0827, 80.2707),
-            "kolkata": (22.5726, 88.3639),
-            "hyderabad": (17.3850, 78.4867),
-            "pune": (18.5204, 73.8567),
-            "ahmedabad": (23.0225, 72.5714),
-            "jaipur": (26.9124, 75.7873),
-            "lucknow": (26.8467, 80.9462),
-            "noida": (28.5355, 77.3910),
-            "gurgaon": (28.4595, 77.0266),
-            "india": (20.5937, 78.9629),
-            "भारत": (20.5937, 78.9629),
-
-            # World Countries
-            "israel": (31.0461, 34.8516),
-            "usa": (37.0902, -95.7129),
-            "united states": (37.0902, -95.7129),
-            "america": (37.0902, -95.7129),
-            "russia": (61.5240, 105.3188),
-            "ukraine": (48.3794, 31.1656),
-            "china": (35.8617, 104.1954),
-            "uk": (55.3781, -3.4360),
-            "united kingdom": (55.3781, -3.4360),
-            "germany": (51.1657, 10.4515),
-            "france": (46.2276, 2.2137),
-            "canada": (56.1304, -106.3468),
-            "australia": (-25.2744, 133.7751),
-            "japan": (36.2048, 138.2529),
-            "brazil": (-14.2350, -51.9253),
-            "pakistan": (30.3753, 69.3451),
-            "bangladesh": (23.6850, 90.3563),
-            "uae": (23.4241, 53.8478),
-            "dubai": (25.2048, 55.2708),
-            "saudi arabia": (23.8859, 45.0792),
-
-            # Global Cities / Trending Locations
-            "tel aviv": (32.0853, 34.7818),
-            "jerusalem": (31.7683, 35.2137),
-            "gaza": (31.5017, 34.4668),
-            "kyiv": (50.4501, 30.5234),
-            "moscow": (55.7558, 37.6173),
-            "new york": (40.7128, -74.0060),
-            "london": (51.5074, -0.1278),
-            "paris": (48.8566, 2.3522),
-            "tokyo": (35.6762, 139.6503),
-            "washington": (38.9072, -77.0369),
-            "beijing": (39.9042, 116.4074),
-        }
-
-    def perform_search(self, keyword):
+    def perform_search(self, keyword, hours=None, user=None):
         all_posts = []
         current_idd = 1
-        twitter_raw = self._fetch_twitter(keyword)
+        
+        # Heuristic Geo detection
+        geo_info = {"lat": None, "lng": None, "name": "", "type": ""}
+        clean_kw = keyword.lower().replace("#", "").strip()
+        for loc in HEURISTIC_LOCATIONS:
+            if loc["name"].lower() == clean_kw:
+                geo_info = {
+                    "lat": loc["lat"],
+                    "lng": loc["lng"],
+                    "name": loc["name"],
+                    "type": loc["type"]
+                }
+                break
+
+        twitter_raw = self._fetch_twitter(keyword, hours=hours)
         for post in twitter_raw:
             text = post.get("text", "")
-            loc_name, lat, lng = self._extract_location(text, keyword, post_metadata=post)
             all_posts.append(
                 {
-                    "id": current_idd,
+                    "id": current_id,
                     "post_id": post.get("id"),
                     "post_title": text[:50] + "..." if len(text) > 50 else text,
                     "post_text": text,
@@ -506,80 +451,166 @@ class SocialMediaSearchView(APIView):
                     "platform": "twitter",
                     "author": post.get("author", ""),
                     "published_at": post.get("created_at"),
-                    "extra_details": post.get("geo") or {},
-                    "location_name": loc_name,
-                    "latitude": lat,
-                    "longitude": lng,
+                    "latitude": geo_info["lat"],
+                    "longitude": geo_info["lng"],
+                    "location_name": geo_info["name"],
+                    "location_type": geo_info["type"],
+                    "extra_details": {},
                 }
             )
-            current_idd += 1
+            current_id += 1
 
-        instagram_raw = self._fetch_instagram(keyword)
+        # Fetch from Instagram
+        instagram_raw = self._fetch_instagram(keyword, hours=hours)
         for post in instagram_raw:
             caption = post.get("caption", "")
-            loc_name, lat, lng = self._extract_location(caption, keyword, post_metadata=post)
             all_posts.append(
                 {
-                    "id": current_idd,
+                    "id": current_id,
                     "post_id": post.get("id"),
                     "post_title": caption[:50].replace("\n", " ") if caption else "Instagram Post",
                     "post_text": caption,
                     "post_url": post.get("permalink"),
                     "platform": "instagram",
-                    "author": post.get("username", ""), 
+                    "author": post.get("username", "N/A"),
                     "published_at": post.get("timestamp"),
+                    "latitude": geo_info["lat"],
+                    "longitude": geo_info["lng"],
+                    "location_name": geo_info["name"],
+                    "location_type": geo_info["type"],
                     "extra_details": {
                         "media_type": post.get("media_type"),
                         "media_url": post.get("media_url"),
-                        "location": post.get("location"),
                     },
-                    "location_name": loc_name,
-                    "latitude": lat,
-                    "longitude": lng,
                 }
             )
-            current_idd += 1
+            current_id += 1
 
-        youtube_raw = self._fetch_youtube(keyword)
-        for post in youtube_raw:
-            text = post.get("description", "")
-            loc_name, lat, lng = self._extract_location(text, keyword, post_metadata=post)
+        # Fetch from Facebook
+        facebook_raw = self._fetch_facebook(keyword, hours=hours)
+        for post in facebook_raw:
+            message = post.get("message", "") or post.get("story", "")
             all_posts.append(
                 {
-                    "id": current_idd,
+                    "id": current_id,
+                    "post_id": post.get("id"),
+                    "post_title": message[:50].replace("\n", " ") if message else "Facebook Post",
+                    "post_text": message,
+                    "post_url": post.get("permalink_url"),
+                    "platform": "facebook",
+                    "author": "Page",
+                    "published_at": post.get("created_time"),
+                    "extra_details": {
+                        "type": post.get("type"),
+                        "likes": post.get("likes", 0),
+                        "comments": post.get("comments", 0),
+                        "shares": post.get("shares", 0),
+                    },
+                }
+            )
+            current_id += 1
+
+        # Fetch from YouTube
+        youtube_raw = self._fetch_youtube(keyword, hours=hours)
+        for post in youtube_raw:
+            all_posts.append(
+                {
+                    "id": current_id,
                     "post_id": post.get("id"),
                     "post_title": post.get("title"),
-                    "post_text": text,
+                    "post_text": post.get("description"),
                     "post_url": post.get("permalink"),
                     "platform": "youtube",
                     "author": post.get("author"),
                     "published_at": post.get("published_at"),
-                    "extra_details": {
-                        **(post.get("extra_details", {})),
-                        "location": post.get("location")
-                    },
-                    "location_name": loc_name,
-                    "latitude": lat,
-                    "longitude": lng,
+                    "latitude": geo_info["lat"],
+                    "longitude": geo_info["lng"],
+                    "location_name": geo_info["name"],
+                    "location_type": geo_info["type"],
+                    "extra_details": post.get("extra_details", {}),
+                }
+            )
+            current_idd += 1
+
+        facebook_raw = self._fetch_facebook(keyword, user=user)
+        for post in facebook_raw:
+            text = post.get("text") or ""
+            # Use real location from Facebook 'place' field if available, else fall back to heuristic
+            fb_location = post.get("location", "")
+            fb_lat = geo_info["lat"]
+            fb_lng = geo_info["lng"]
+            fb_loc_name = fb_location if fb_location else geo_info["name"]
+            fb_loc_type = geo_info["type"]
+            all_posts.append(
+                {
+                    "id": current_idd,
+                    "post_id": post.get("id"),
+                    "post_title": text[:50] + "..." if len(text) > 50 else text,
+                    "post_text": text,
+                    "post_url": post.get("permalink"),
+                    "platform": "facebook",
+                    "author": post.get("author"),
+                    "published_at": post.get("created_at"),
+                    "latitude": fb_lat,
+                    "longitude": fb_lng,
+                    "location_name": fb_loc_name,
+                    "location_type": fb_loc_type,
+                    "extra_details": {},
                 }
             )
             current_idd += 1
         
-        add_to_sentiment_queue(all_posts, keyword=keyword)
-        
-        return {
-            "youtube": len(youtube_raw),
-            "instagram": len(instagram_raw),
-            "twitter": len(twitter_raw),
-        }
+        # If hours filter is provided, filter all_posts by published_at
+        if hours:
+            try:
+                hours_int = int(hours)
+                time_threshold = timezone.now() - timedelta(hours=hours_int)
+                filtered_posts = []
+                for post in all_posts:
+                    pub_at = post.get("published_at")
+                    if pub_at:
+                        try:
+                            # Handle ISO 8601 strings
+                            if isinstance(pub_at, str):
+                                dt = datetime.fromisoformat(pub_at.replace("Z", "+00:00"))
+                            else:
+                                dt = pub_at
+                            if dt >= time_threshold:
+                                filtered_posts.append(post)
+                        except (ValueError, TypeError):
+                            filtered_posts.append(post)
+                    else:
+                        filtered_posts.append(post)
+                all_posts = filtered_posts
+            except ValueError:
+                pass
 
+        add_to_sentiment_quene(all_posts, keyword=keyword)
+        
+        # Calculate counts by platform
+        yt_count = len([p for p in all_posts if p['platform'] == 'youtube'])
+        ig_count = len([p for p in all_posts if p['platform'] == 'instagram'])
+        tw_count = len([p for p in all_posts if p['platform'] == 'twitter'])
+        fb_count = len([p for p in all_posts if p['platform'] == 'facebook'])
+
+        return {
+            "youtube": yt_count,
+            "instagram": ig_count,
+            "twitter": tw_count,
+            "facebook": fb_count,
+        }
 
     def get(self, request):
         keyword = request.query_params.get("keyword")
+        hours = request.query_params.get("hours")
         if not keyword:
             return Response({"error": "Keyword is required"}, status=400)
 
-        counts = self.perform_search(keyword)
+        counts = self.perform_search(keyword, hours=hours, user=request.user)
+        
+        # Save keyword for the current user to ensure it's tracked and shown in history
+        User_Keyword.objects.get_or_create(user=request.user, keyword=keyword.strip())
+
         return Response(
             {
                 "success": True,
@@ -589,49 +620,12 @@ class SocialMediaSearchView(APIView):
         )
 
 
-class ScraperStatusView(SocialMediaSearchView):
-    """View to check if API keys are working correctly"""
-    permission_classes = [IsAuthenticated]
-
-    def get(self, request):
-        keyword = "news"
-        status = {}
-        
-        # Test YouTube
-        yt_results = self._fetch_youtube(keyword)
-        status['youtube'] = {
-            'configured': bool(settings.YOUTUBE_API_KEY),
-            'working': len(yt_results) > 0,
-            'count': len(yt_results)
-        }
-
-        # Test Twitter
-        tw_results = self._fetch_twitter(keyword)
-        status['twitter'] = {
-            'configured': bool(settings.TWITTER_BEARER_TOKEN),
-            'working': len(tw_results) > 0,
-            'count': len(tw_results)
-        }
-
-        # Test Instagram
-        ig_results = self._fetch_instagram(keyword)
-        status['instagram'] = {
-            'configured': bool(settings.INSTAGRAM_ACCESS_TOKEN and settings.INSTAGRAM_BUSINESS_ACCOUNT_ID),
-            'working': len(ig_results) > 0,
-            'count': len(ig_results)
-        }
-
-        return Response({
-            "success": True,
-            "platforms": status
-        })
-
-
 class UserKeywordSearchTriggerView(SocialMediaSearchView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
         user_keywords = User_Keyword.objects.filter(user=request.user).values_list("keyword", flat=True)
+        hours = request.query_params.get("hours")
         
         if not user_keywords:
             return Response({"error": "No keywords found for this user. Please add keywords first."}, status=400)
@@ -640,14 +634,15 @@ class UserKeywordSearchTriggerView(SocialMediaSearchView):
             "youtube": 0,
             "instagram": 0,
             "twitter": 0,
+            "facebook": 0,
         }
         processed_keywords = []
 
         for kw in user_keywords:
-            counts = self.perform_search(kw)
+            counts = self.perform_search(kw, hours=hours, user=request.user)
             processed_keywords.append(kw)
-            for platform in total_counts:
-                total_counts[platform] += counts.get(platform, 0)
+            for platform in counts:
+                total_counts[platform] = total_counts.get(platform, 0) + counts[platform]
 
         return Response({
             "success": True,
@@ -706,49 +701,52 @@ class AddKeywordView(APIView):
 
 
 class UserSentimentView(APIView):
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        keyword_filter = request.query_params.get("keyword")
-        
-        # If user is authenticated, we can filter by their keywords if no specific keyword is asked
-        if request.user.is_authenticated:
-            user_keywords = list(
-                User_Keyword.objects.filter(user=request.user)
-                .values_list("keyword", flat=True)
-            )
-        else:
-            user_keywords = []
+        user_keywords = list(
+            User_Keyword.objects.filter(user=request.user)
+            .values_list("keyword", flat=True)
+        )
 
-        from django.utils import timezone
-        from datetime import timedelta
-
-        # strictly show only the latest 24 hours of data as per user request
-        time_threshold = timezone.now() - timedelta(hours=24)
-        sentiments = Sentiment.objects.select_related("post").filter(
-            post__published_at__gte=time_threshold
-        ).order_by("-analyzed_at")
-
-        if keyword_filter:
-            # If a specific keyword is requested via query param
-            sentiments = sentiments.filter(keyword__iexact=keyword_filter)
+        if not user_keywords:
+            return Response({
+                "success": True,
+                "count": 0,
+                "page": 1,
+                "page_size": 20,
+                "total_pages": 0,
+                "results": [],
+                "message": "No keywords found for this user. Please add keywords first.",
+            })
             
-            if request.user.is_authenticated:
-                # Add this keyword to the user's keywords so it shows up in their dashboard
-                User_Keyword.objects.get_or_create(user=request.user, keyword=keyword_filter.strip())
+        sentiments = (
+            Sentiment.objects
+            .select_related("post")
+            .order_by("-analyzed_at")
+        )
 
-            # Auto-trigger a search if we have NO data for this keyword
-            if not sentiments.exists():
-                try:
-                    search_view = SocialMediaSearchView()
-                    search_view.perform_search(keyword_filter)
-                except Exception as e:
-                    print(f"Error auto-triggering search: {e}")
-                    
-        elif user_keywords:
-            # Otherwise, if logged in, show their own keyword results
-            sentiments = sentiments.filter(keyword__in=user_keywords)
-        # If neither, 'sentiments' remains the full list (or we could limit to most recent)
+        keyword_filter = request.query_params.get("keyword", "").strip()
+        if keyword_filter:
+            # Flexible keyword matching: check for exact, or with/without leading '#'
+            q_filter = Q(keyword__iexact=keyword_filter)
+            if keyword_filter.startswith("#"):
+                q_filter |= Q(keyword__iexact=keyword_filter[1:])
+            else:
+                q_filter |= Q(keyword__iexact=f"#{keyword_filter}")
+            
+            sentiments = sentiments.filter(q_filter)
+        else:
+            # If no specific keyword filter, fall back to user's registered keywords
+            # For each user keyword, we also want to be flexible
+            user_q = Q()
+            for kw in user_keywords:
+                user_q |= Q(keyword__iexact=kw)
+                if kw.startswith("#"):
+                    user_q |= Q(keyword__iexact=kw[1:])
+                else:
+                    user_q |= Q(keyword__iexact=f"#{kw}")
+            sentiments = sentiments.filter(user_q)
 
         sentiment_filter = request.query_params.get("sentiment")
         if sentiment_filter:
@@ -758,40 +756,69 @@ class UserSentimentView(APIView):
         if platform_filter:
             sentiments = sentiments.filter(post__platform__iexact=platform_filter)
 
-        # Geo filters: countries, states, cities are location names
-        countries_param = request.query_params.get("countries", "")
-        states_param = request.query_params.get("states", "")
-        cities_param = request.query_params.get("cities", "")
-
-        location_filters = []
-        if countries_param:
-            location_filters.extend([c.strip() for c in countries_param.split(",") if c.strip()])
-        if states_param:
-            location_filters.extend([s.strip() for s in states_param.split(",") if s.strip()])
-        if cities_param:
-            location_filters.extend([c.strip() for c in cities_param.split(",") if c.strip()])
-
-        if location_filters:
-            from django.db.models import Q as LocationQ
-            location_query = LocationQ()
-            for loc in location_filters:
-                location_query |= LocationQ(post__location_name__icontains=loc)
-            sentiments = sentiments.filter(location_query)
-
-        # Date filter
-        date_param = request.query_params.get("date", "")
-        if date_param:
+        # Optional hours filter — only apply if provided by frontend
+        hours_filter = request.query_params.get("hours")
+        if hours_filter:
             try:
-                from datetime import date as date_cls
-                from django.db.models.functions import TruncDate
-                parsed_date = date_cls.fromisoformat(date_param)
-                sentiments = sentiments.filter(post__published_at__date=parsed_date)
-            except (ValueError, TypeError):
-                pass  # Ignore bad date formats
+                hours_int = int(hours_filter)
+                time_threshold = timezone.now() - timedelta(hours=hours_int)
+                sentiments = sentiments.filter(post__published_at__gte=time_threshold)
+            except ValueError:
+                pass
 
-        # Support fetching all records without pagination
-        all_data = request.query_params.get("all", "false").lower() == "true"
-        if all_data:
+        # Date range filter: date_from and date_to (YYYY-MM-DD)
+        date_from = request.query_params.get("date_from")
+        date_to = request.query_params.get("date_to")
+        if date_from:
+            try:
+                dt_from = datetime.strptime(date_from, "%Y-%m-%d")
+                from django.utils.timezone import make_aware
+                dt_from = make_aware(dt_from)
+                sentiments = sentiments.filter(post__published_at__gte=dt_from)
+            except ValueError:
+                pass
+        if date_to:
+            try:
+                from datetime import time as dtime
+                dt_to = datetime.strptime(date_to, "%Y-%m-%d")
+                # Include the full day by going to 23:59:59
+                dt_to = datetime.combine(dt_to.date(), dtime(23, 59, 59))
+                from django.utils.timezone import make_aware
+                dt_to = make_aware(dt_to)
+                sentiments = sentiments.filter(post__published_at__lte=dt_to)
+            except ValueError:
+                pass
+
+        # Optional location filter — Country, State, City
+        countries = request.query_params.get("countries")
+        states = request.query_params.get("states")
+        cities = request.query_params.get("cities")
+        
+        if countries or states or cities:
+            # We filter by location_name or location_type metadata
+            loc_q = Q()
+            if countries:
+                loc_list = [c.strip() for c in countries.split(",")]
+                loc_q |= Q(post__location_name__in=loc_list, post__location_type="country")
+            if states:
+                loc_list = [s.strip() for s in states.split(",")]
+                loc_q |= Q(post__location_name__in=loc_list, post__location_type="state")
+            if cities:
+                loc_list = [c.strip() for c in cities.split(",")]
+                loc_q |= Q(post__location_name__in=loc_list, post__location_type="city")
+            
+            sentiments = sentiments.filter(loc_q)
+
+        # Optional location filter — only include posts with real location (defaults to false now)
+        location_only = request.query_params.get("location_only", "false")
+        if location_only.lower() == "true":
+            sentiments = sentiments.filter(
+                Q(post__latitude__isnull=False) | Q(post__location_name__gt="")
+            )
+
+        # Skip pagination if 'all=true' is requested
+        all_data = request.query_params.get("all", "false")
+        if all_data.lower() == "true":
             serializer = UserSentimentSerializer(sentiments, many=True)
             return Response({
                 "success": True,
@@ -805,7 +832,7 @@ class UserSentimentView(APIView):
             page = 1
         try:
             page_size = min(
-                max(int(request.query_params.get("page_size", 20)), 1), 1000
+                max(int(request.query_params.get("page_size", 20)), 1), 100
             )
         except (ValueError, TypeError):
             page_size = 20
@@ -818,154 +845,12 @@ class UserSentimentView(APIView):
         page_results = sentiments[start:end]
         serializer = UserSentimentSerializer(page_results, many=True)
 
-
-
-class LiveSearchView(SocialMediaSearchView):
-    """
-    Live search: fetches directly from YouTube API and returns results
-    instantly WITHOUT saving to DB.
-    """
-    permission_classes = [AllowAny]
-
-    def _collect_all_page_tokens(self, keyword):
-        """Step 1: Collect all pageTokens by paginating search (fast - no detail fetch)."""
-        search_url = "https://www.googleapis.com/youtube/v3/search"
-        pages = []  # list of (video_ids, next_page_token)
-        next_token = None
-
-        while True:
-            params = {
-                "part": "id",  # Only IDs — fastest, cheapest
-                "q": keyword,
-                "type": "video",
-                "key": settings.YOUTUBE_API_KEY,
-                "maxResults": 50,
-            }
-            if next_token:
-                params["pageToken"] = next_token
-            try:
-                resp = requests.get(search_url, params=params, timeout=15)
-                data = resp.json()
-            except Exception as e:
-                print(f"Token collect error: {e}")
-                break
-
-            if "error" in data:
-                print(f"YouTube error: {data['error'].get('message')}")
-                break
-
-            video_ids = [
-                item["id"]["videoId"]
-                for item in data.get("items", [])
-                if item.get("id", {}).get("kind") == "youtube#video"
-            ]
-            if video_ids:
-                pages.append(video_ids)
-
-            next_token = data.get("nextPageToken")
-            if not next_token:
-                break
-
-        return pages  # list of batches of video IDs
-
-    def _fetch_details_batch(self, video_ids):
-        """Fetch snippet+recordingDetails for a batch of up to 50 video IDs."""
-        details_url = "https://www.googleapis.com/youtube/v3/videos"
-        try:
-            resp = requests.get(details_url, params={
-                "part": "snippet,recordingDetails",
-                "id": ",".join(video_ids),
-                "key": settings.YOUTUBE_API_KEY,
-            }, timeout=15)
-            return resp.json().get("items", [])
-        except Exception as e:
-            print(f"Details batch error: {e}")
-            return []
-
-    def get(self, request):
-        keyword = request.query_params.get("keyword", "").strip()
-        if not keyword:
-            return Response({"error": "Keyword is required."}, status=400)
-
-        if not settings.YOUTUBE_API_KEY:
-            return Response({"error": "YouTube API key not configured."}, status=500)
-
-        # Step 1: Collect all video ID batches across all pages (sequential but fast - only IDs)
-        id_batches = self._collect_all_page_tokens(keyword)
-        print(f"[LiveSearch] Collected {len(id_batches)} pages of video IDs for '{keyword}'")
-
-        if not id_batches:
-            return Response({"success": True, "count": 0, "results": []})
-
-        # Step 2: Fetch details for ALL batches IN PARALLEL using threads
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-        all_items = []
-        with ThreadPoolExecutor(max_workers=10) as executor:
-            futures = {executor.submit(self._fetch_details_batch, batch): batch for batch in id_batches}
-            for future in as_completed(futures):
-                all_items.extend(future.result())
-
-        print(f"[LiveSearch] Total videos fetched: {len(all_items)}")
-
-        # Step 3: Format + sentiment analysis
-        from textblob import TextBlob
-        formatted = []
-        for item in all_items:
-            snippet = item.get("snippet", {})
-            rec = item.get("recordingDetails", {})
-            location = rec.get("location", {})
-
-            title = snippet.get("title", "")
-            description = snippet.get("description", "")
-            combined_text = f"{title} {description}".strip()
-
-            post_metadata = {
-                "location": {
-                    "latitude": location.get("latitude"),
-                    "longitude": location.get("longitude"),
-                    "name": rec.get("locationDescription"),
-                }
-            }
-            loc_name, lat, lng = self._extract_location(combined_text, keyword, post_metadata=post_metadata)
-
-            raw_sentiment = "Neutral"
-            try:
-                polarity = TextBlob(combined_text).sentiment.polarity
-                if polarity > 0.05:
-                    raw_sentiment = "Positive"
-                elif polarity < -0.05:
-                    raw_sentiment = "Negative"
-            except Exception:
-                pass
-
-            formatted.append({
-                "id": f"live_{item.get('id', '')}",
-                "post_title": title,
-                "post_text": description,
-                "post_url": f"https://www.youtube.com/watch?v={item.get('id', '')}",
-                "platform": "youtube",
-                "author": snippet.get("channelTitle", ""),
-                "published_at": snippet.get("publishedAt", ""),
-                "analyzed_at": None,
-                "keyword": keyword,
-                "sentiment_label": raw_sentiment,
-                "location_name": loc_name,
-                "latitude": lat,
-                "longitude": lng,
-                "is_live": True,
-            })
-
-        # Sort newest first
-        formatted.sort(key=lambda x: x.get("published_at") or "", reverse=True)
-
         return Response({
             "success": True,
-            "count": len(formatted),
-            "results": formatted,
+            "count": total_count,
+            "page": page,
+            "page_size": page_size,
+            "total_pages": total_pages,
+            "results": serializer.data,
         })
-
-        """Fetch ONE page from YouTube API. Returns (results, next_page_token)."""
-        if not settings.YOUTUBE_API_KEY:
-            return [], None
-
 

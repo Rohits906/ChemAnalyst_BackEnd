@@ -13,6 +13,7 @@ ALLOWED_HOSTS = ['.onrender.com', 'localhost', '127.0.0.1']
 CORS_ALLOW_CREDENTIALS = True
 CSRF_TRUSTED_ORIGINS = [
     "http://localhost:3000",
+    "http://localhost:8000",
 ]
 INSTALLED_APPS = [
     "django.contrib.admin",
@@ -88,8 +89,14 @@ USE_I18N = True
 
 USE_TZ = True
 
+
+# Static files (CSS, JavaScript, Images)
 STATIC_URL = "static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
+
+# Media files (Uploaded by users)
+MEDIA_URL = "/media/"
+MEDIA_ROOT = BASE_DIR / "media"
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
@@ -108,6 +115,33 @@ INSTAGRAM_ACCESS_TOKEN = config("INSTAGRAM_ACCESS_TOKEN", default="")
 INSTAGRAM_BUSINESS_ACCOUNT_ID = config("INSTAGRAM_BUSINESS_ACCOUNT_ID", default="")
 YOUTUBE_API_KEY = config("YOUTUBE_API_KEY", default="")
 TWITTER_BEARER_TOKEN = config("TWITTER_BEARER_TOKEN", default="")
+FACEBOOK_PAGE_ACCESS_TOKEN = config("FACEBOOK_PAGE_ACCESS_TOKEN", default="")
+FACEBOOK_PAGE_ID = config("FACEBOOK_PAGE_ID", default="")
+
+# frontend url used by OAuth callbacks
+FRONTEND_URL = config("FRONTEND_URL", default="http://localhost:3000")
+
+# OAuth / API credentials for other platforms
+FACEBOOK_APP_ID = config("FACEBOOK_APP_ID", default="")
+FACEBOOK_APP_SECRET = config("FACEBOOK_APP_SECRET", default="")
+INSTAGRAM_CLIENT_ID = config("INSTAGRAM_CLIENT_ID", default="")
+INSTAGRAM_CLIENT_SECRET = config("INSTAGRAM_CLIENT_SECRET", default="")
+TWITTER_API_KEY = config("TWITTER_API_KEY", default="")
+TWITTER_API_SECRET = config("TWITTER_API_SECRET", default="")
+LINKEDIN_CLIENT_ID = config("LINKEDIN_CLIENT_ID", default="")
+LINKEDIN_CLIENT_SECRET = config("LINKEDIN_CLIENT_SECRET", default="")
+FACEBOOK_API_VERSION = config('FACEBOOK_API_VERSION', 'v19.0')
+FACEBOOK_REDIRECT_URI = config('FACEBOOK_REDIRECT_URI', 'http://localhost:3000/api/platform/oauth/callback/')
+
+# Twitter (X) API v2 OAuth settings
+TWITTER_APP_ID = config("TWITTER_APP_ID", default="")
+TWITTER_APP_SECRET = config("TWITTER_APP_SECRET", default="")
+TWITTER_REDIRECT_URI = config("TWITTER_REDIRECT_URI", default="http://localhost:3000/api/platform/oauth/callback/twitter")
+TWITTER_API_VERSION = "v2"
+
+# System pre-configured Meta credentials (for system-connect feature)
+FACEBOOK_PAGE_ID = config("FACEBOOK_PAGE_ID", default="")
+FACEBOOK_PAGE_ACCESS_TOKEN = config("FACEBOOK_PAGE_ACCESS_TOKEN", default="")
 
 
 # KAFKA CONFIG

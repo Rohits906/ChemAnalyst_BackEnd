@@ -39,6 +39,7 @@ def fetch_youtube_channel_data(platform_obj):
         
         # Try different lookup methods
         lookup_methods = [
+            ("forHandle", {"part": "statistics,snippet", "forHandle": f"@{channel_id}"}),
             ("forUsername", {"part": "statistics,snippet", "forUsername": channel_id}),
             ("direct ID", {"part": "statistics,snippet", "id": channel_id}),
         ]
