@@ -147,20 +147,10 @@ class SocialMediaSearchView(APIView):
             if "data" not in data or not data["data"]:
                 return []
             
-            # Create a fake account object for .env credentials
-            class EnvAccount:
-                def __init__(self):
-                    self.access_token = settings.FACEBOOK_PAGE_ACCESS_TOKEN
-                    self.account_id = settings.FACEBOOK_PAGE_ID
-                    self.account_name = "System Facebook Page"
-            
-            all_accounts = [EnvAccount()]
-            print(f"🔄 [FACEBOOK] Using system credentials from .env for page: {settings.FACEBOOK_PAGE_ID}")
-        
-        # Step 3: Fetch posts from all connected accounts
-        try:
-            api_version = getattr(settings, 'FACEBOOK_API_VERSION', 'v19.0')
+            hashtag_id = data["data"][0]["id"]
+            posts = []
             seen_ids = set()
+            
             for endpoint in ["recent_media", "top_media"]:
                 media_url = f"https://graph.facebook.com/v22.0/{hashtag_id}/{endpoint}"
                 media_params = {
@@ -175,6 +165,7 @@ class SocialMediaSearchView(APIView):
                         if item["id"] not in seen_ids:
                             posts.append(item)
                             seen_ids.add(item["id"])
+            
             return posts
             
         except Exception as e:
