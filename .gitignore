@@ -47,3 +47,7 @@ coverage.xml
 # Kafka Server
 kafka_server/
 *.tgz        
+>>>>>>> rishi
+.pyre_check/       
+__pycache__
+migrations 
