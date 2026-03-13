@@ -13,7 +13,7 @@ class MetaBaseService:
     def __init__(self, platform=None, access_token=None):
         self.platform = platform
         self.access_token = access_token
-        self.api_version = getattr(settings, 'FACEBOOK_API_VERSION', 'v19.0')
+        self.api_version = getattr(settings, 'FACEBOOK_API_VERSION', 'v25.0')
         self.base_url = f"https://graph.facebook.com/{self.api_version}"
         
         # If platform exists, try to get token from metadata
@@ -121,10 +121,7 @@ class FacebookService(MetaBaseService):
         """Fetch Facebook page information"""
         try:
             fields = [
-                'id', 'name', 'about', 'description', 'website',
-                'picture', 'cover', 'category', 'fan_count',
-                'followers_count', 'talking_about_count', 'verification_status',
-                'engagement', 'unread_message_count', 'unread_notif_count'
+                'id', 'name', 'fan_count', 'followers_count', 'picture'
             ]
             
             data = self._make_request(
@@ -137,9 +134,16 @@ class FacebookService(MetaBaseService):
             if data.get('picture') and data['picture'].get('data'):
                 picture_url = data['picture']['data'].get('url', '')
             
-            # Get page insights for reach and engagement
-            insights = self._fetch_page_insights()
-            
+            # Optional: Get page insights for reach and engagement (wrapped in try-except)
+            total_reach = 0
+            total_engagement = 0
+            try:
+                insights = self._fetch_page_insights()
+                total_reach = insights.get('page_impressions', 0)
+                total_engagement = insights.get('page_engaged_users', 0)
+            except Exception as ie:
+                logger.warning(f"Could not fetch Facebook insights: {ie}")
+
             channel_info = {
                 'channel_id': data.get('id'),
                 'channel_name': data.get('name', ''),
@@ -149,9 +153,9 @@ class FacebookService(MetaBaseService):
                 'category': data.get('category', ''),
                 'followers': data.get('followers_count', data.get('fan_count', 0)),
                 'talking_about': data.get('talking_about_count', 0),
-                'posts_count': 0,  # Will be updated from posts fetch
-                'total_reach': insights.get('page_impressions', 0),
-                'total_engagement': insights.get('page_engaged_users', 0),
+                'posts_count': len(self._make_request(f"{self.page_id}/posts", params={'limit': 100}).get('data', [])) if self.page_id else 0,
+                'total_reach': total_reach,
+                'total_engagement': total_engagement,
                 'verified': data.get('verification_status', 'not_verified') == 'verified',
                 'website': data.get('website', ''),
                 'cover_photo': data.get('cover', {}).get('source', '') if data.get('cover') else ''
@@ -207,20 +211,14 @@ class FacebookService(MetaBaseService):
         """Fetch Facebook page posts"""
         try:
             fields = [
-                'id', 'message', 'story', 'created_time', 'permalink_url',
+                'id', 'message', 'created_time', 'permalink_url',
                 'full_picture', 'attachments{media,subattachments}',
                 'likes.summary(true).limit(0)',
                 'comments.summary(true).limit(0)',
-                'shares',
-                'reactions.type(LIKE).summary(total_count).limit(0) as reactions_like',
-                'reactions.type(LOVE).summary(total_count).limit(0) as reactions_love',
-                'reactions.type(HAHA).summary(total_count).limit(0) as reactions_haha',
-                'reactions.type(WOW).summary(total_count).limit(0) as reactions_wow',
-                'reactions.type(SAD).summary(total_count).limit(0) as reactions_sad',
-                'reactions.type(ANGRY).summary(total_count).limit(0) as reactions_angry',
-                'insights.metric(post_impressions,post_engaged_users)'
+                'shares'
             ]
             
+            print(f"DEBUG FacebookService - Fetching posts for Page ID: {self.page_id}")
             data = self._make_request(
                 f"{self.page_id}/posts",
                 params={
@@ -299,17 +297,14 @@ class FacebookService(MetaBaseService):
                 'media_urls': media_urls,
                 'media_type': media_type,
                 'likes': likes,
-                'reactions': reactions,
                 'comments': post.get('comments', {}).get('summary', {}).get('total_count', 0),
                 'shares': post.get('shares', {}).get('count', 0),
                 'impressions': impressions,
                 'engaged_users': engaged_users,
-                'engagement_rate': (engaged_users / impressions * 100) if impressions > 0 else 0,
                 'published_at': post.get('created_time'),
                 'metadata': {
                     'story': post.get('story', ''),
                     'is_published': True,
-                    'reactions_breakdown': reactions
                 }
             }
             
@@ -364,9 +359,8 @@ class InstagramService(MetaBaseService):
                     return None
             
             fields = [
-                'id', 'username', 'name', 'biography', 'profile_picture_url',
-                'followers_count', 'follows_count', 'media_count',
-                'ig_id', 'website', 'business_discovery'
+                'id', 'username', 'name', 'profile_picture_url',
+                'followers_count', 'follows_count', 'media_count'
             ]
             
             data = self._make_request(
@@ -374,9 +368,16 @@ class InstagramService(MetaBaseService):
                 params={'fields': ','.join(fields)}
             )
             
-            # Fetch insights
-            insights = self._fetch_account_insights()
-            
+            # Fetch insights optionally
+            total_reach = 0
+            total_impressions = 0
+            try:
+                insights = self._fetch_account_insights()
+                total_reach = insights.get('reach', 0)
+                total_impressions = insights.get('impressions', 0)
+            except Exception as ie:
+                logger.warning(f"Could not fetch Instagram account insights: {ie}")
+
             channel_info = {
                 'channel_id': data.get('id'),
                 'channel_name': data.get('username', ''),
@@ -387,13 +388,8 @@ class InstagramService(MetaBaseService):
                 'followers': data.get('followers_count', 0),
                 'following': data.get('follows_count', 0),
                 'posts_count': data.get('media_count', 0),
-                'total_reach': insights.get('reach', 0),
-                'total_impressions': insights.get('impressions', 0),
-                'profile_views': insights.get('profile_views', 0),
-                'email_contacts': insights.get('email_contacts', 0),
-                'phone_calls': insights.get('phone_calls', 0),
-                'text_messages': insights.get('text_messages', 0),
-                'website_clicks': insights.get('website_clicks', 0)
+                'total_reach': total_reach,
+                'total_impressions': total_impressions,
             }
             
             return channel_info
@@ -453,8 +449,7 @@ class InstagramService(MetaBaseService):
             fields = [
                 'id', 'caption', 'media_type', 'media_url', 'permalink',
                 'timestamp', 'like_count', 'comments_count',
-                'thumbnail_url', 'children{media_url,media_type}',
-                'insights.metric(reach,impressions,saved)'
+                'thumbnail_url', 'children{media_url,media_type}'
             ]
             
             data = self._make_request(
@@ -491,12 +486,17 @@ class InstagramService(MetaBaseService):
                     if child.get('media_url'):
                         media_urls.append(child['media_url'])
             
-            # Extract insights
-            insights = {}
-            if post.get('insights'):
-                for insight in post['insights'].get('data', []):
-                    insights[insight['name']] = insight['values'][0]['value'] if insight.get('values') else 0
-            
+            # Extract insights optionally
+            reach = 0
+            impressions = 0
+            try:
+                if post.get('insights'):
+                    for insight in post['insights'].get('data', []):
+                        if insight['name'] == 'reach': reach = insight['values'][0]['value']
+                        if insight['name'] == 'impressions': impressions = insight['values'][0]['value']
+            except:
+                pass
+
             return {
                 'platform_post_id': post['id'],
                 'title': (post.get('caption', '')[:100] + '...') if post.get('caption') else 'Instagram Post',
@@ -506,14 +506,12 @@ class InstagramService(MetaBaseService):
                 'media_type': media_type,
                 'likes': post.get('like_count', 0),
                 'comments': post.get('comments_count', 0),
-                'reach': insights.get('reach', 0),
-                'impressions': insights.get('impressions', 0),
-                'saved': insights.get('saved', 0),
+                'reach': reach,
+                'impressions': impressions,
                 'published_at': post.get('timestamp'),
                 'metadata': {
                     'media_type': media_type,
                     'has_children': 'children' in post,
-                    'insights': insights
                 }
             }
             

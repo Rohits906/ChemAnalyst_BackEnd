@@ -121,7 +121,7 @@ TWITTER_API_KEY = config("TWITTER_API_KEY", default="")
 TWITTER_API_SECRET = config("TWITTER_API_SECRET", default="")
 LINKEDIN_CLIENT_ID = config("LINKEDIN_CLIENT_ID", default="")
 LINKEDIN_CLIENT_SECRET = config("LINKEDIN_CLIENT_SECRET", default="")
-FACEBOOK_API_VERSION = config('FACEBOOK_API_VERSION', 'v19.0')
+FACEBOOK_API_VERSION = config('FACEBOOK_API_VERSION', 'v25.0')
 FACEBOOK_REDIRECT_URI = config('FACEBOOK_REDIRECT_URI', 'http://localhost:3000/api/platform/oauth/callback/')
 
 # Twitter (X) API v2 OAuth settings
