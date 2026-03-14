@@ -422,7 +422,7 @@ class FacebookService(BasePlatformService):
     def __init__(self, platform):
         super().__init__(platform)
         self.page_token = settings.FACEBOOK_PAGE_ACCESS_TOKEN
-        self.base_url = "https://graph.facebook.com/v22.0"
+        self.base_url = "https://graph.facebook.com/v25.0"
         
     def fetch_channel_info(self):
         """Fetch Facebook page information"""
@@ -445,7 +445,7 @@ class FacebookService(BasePlatformService):
                 "channel_name": page_data.get("name", ""),
                 "profile_picture": page_data.get("picture", {}).get("data", {}).get("url", ""),
                 "followers": page_data.get("followers_count", 0) or page_data.get("fan_count", 0),
-                "posts_count": 0,  # Would require additional endpoint
+                "posts_count": len(self._make_request(f"{self.page_id}/posts", params={'limit': 100}).get('data', [])) if self.page_id else 0,  # Would require additional endpoint
             }
         except Exception as e:
             import logging
