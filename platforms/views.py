@@ -12,7 +12,7 @@ from rest_framework.response import Response
 from rest_framework import status
 from datetime import datetime, timedelta
 
-from .models import Platform, ChannelStats, ChannelPost, PlatformFetchTask
+from .models import Platform, ChannelStats, ChannelPost, PlatformFetchTask, UserSocialAccount
 from .serializers import (
     PlatformSerializer, PlatformCreateSerializer, ChannelStatsSerializer,
     ChannelPostSerializer, DashboardStatsSerializer, BarChartDataSerializer,
@@ -130,8 +130,7 @@ class PlatformDetailView(APIView):
     
     def delete(self, request, pk):
         platform = self.get_object(pk)
-        platform.is_active = False
-        platform.save()
+        platform.delete()
         return Response({"message": "Platform removed successfully"})
 
 
@@ -313,8 +312,8 @@ class OAuthInitiateView(APIView):
         
         # OAuth scopes based on platform
         scopes = {
-            'facebook': 'pages_show_list,pages_read_engagement',
-            'instagram': 'pages_show_list,pages_read_engagement'
+            'facebook': 'pages_show_list,pages_read_engagement,pages_read_user_content',
+            'instagram': 'instagram_basic,instagram_manage_insights,pages_show_list,pages_read_engagement'
         }
         
         # Build auth URL
@@ -343,6 +342,8 @@ class OAuthCallbackView(APIView):
     permission_classes = []  # No auth required for OAuth callback
 
     def get(self, request, platform):
+        print(f"DEBUG OAuthCallbackView.get - Entering callback for platform: {platform}")
+        print(f"DEBUG OAuthCallbackView.get - Full Path: {request.get_full_path()}")
         platform = platform.lower()
         code = request.GET.get('code')
         error = request.GET.get('error')
@@ -357,7 +358,7 @@ class OAuthCallbackView(APIView):
             logger.error(f"OAuth error for {platform}: {error} - {error_description}")
             redirect_url = (
                 f"{frontend_url}/platforms"
-                f"?oauth_error=1"
+                f"?oauth_error=true"
                 f"&platform={platform}"
                 f"&reason={error_reason or 'access_denied'}"
             )
@@ -379,13 +380,41 @@ class OAuthCallbackView(APIView):
             
             short_lived_token = token_data['access_token']
             
+            # DEBUG: Inspect the token
+            inspect_url = "https://graph.facebook.com/debug_token"
+            inspect_params = {
+                'input_token': short_lived_token,
+                'access_token': f"{settings.FACEBOOK_APP_ID}|{settings.FACEBOOK_APP_SECRET}"
+            }
+            inspect_res = requests.get(inspect_url, params=inspect_params)
+            print(f"DEBUG OAuthCallbackView.get - Token Inspection: {inspect_res.json()}")
+            
+            # DEBUG: Try accounts with short-lived token
+            sl_accounts = requests.get(f"https://graph.facebook.com/{settings.FACEBOOK_API_VERSION}/me/accounts", params={'access_token': short_lived_token})
+            print(f"DEBUG OAuthCallbackView.get - Short-lived accounts count: {len(sl_accounts.json().get('data', []))}")
+            if sl_accounts.json().get('data'):
+                 print(f"DEBUG OAuthCallbackView.get - Short-lived accounts: {[p.get('name') for p in sl_accounts.json().get('data')]}")
+            
             # Step 2: Exchange for long-lived token
             long_lived_token = self._get_long_lived_token(short_lived_token)
             
+            # DEBUG: Check user identity
+            user_res = requests.get(f"https://graph.facebook.com/{settings.FACEBOOK_API_VERSION}/me", params={'fields': 'id,name', 'access_token': long_lived_token})
+            print(f"DEBUG OAuthCallbackView.get - FB Connected User: {user_res.json()}")
+            
+            # DEBUG: Check permissions
+            perm_res = requests.get(f"https://graph.facebook.com/{settings.FACEBOOK_API_VERSION}/me/permissions", params={'access_token': long_lived_token})
+            print(f"DEBUG OAuthCallbackView.get - Granted Permissions: {perm_res.json().get('data')}")
+            
             # Step 3: Get page access tokens
+            print(f"DEBUG OAuthCallbackView.get - Fetching pages for user with long-lived token...")
             pages_data = self._get_user_pages(long_lived_token)
+            print(f"DEBUG OAuthCallbackView.get - Raw pages data count: {len(pages_data)}")
+            for idx, p in enumerate(pages_data):
+                print(f"DEBUG OAuthCallbackView.get - Page {idx}: {p.get('name')} (IG Business: {bool(p.get('instagram_business_account'))})")
             
             # Step 4: Create or update platforms
+            print(f"DEBUG OAuthCallbackView.get - Calling _create_platforms with type: {platform}")
             platforms_created = self._create_platforms(
                 user=user,
                 platform_type=platform,
@@ -393,6 +422,9 @@ class OAuthCallbackView(APIView):
                 pages_data=pages_data,
                 token_expiry=token_data.get('expires_in', 5184000)  # Default 60 days
             )
+            print(f"DEBUG OAuthCallbackView.get - Platforms created count: {len(platforms_created)}")
+            for p in platforms_created:
+                print(f"DEBUG OAuthCallbackView.get - Created/Updated: {p.name} - {p.channel_name}")
             
             # Queue fetch for each platform (async)
             for platform_obj in platforms_created:
@@ -487,7 +519,7 @@ class OAuthCallbackView(APIView):
             
             redirect_url = (
                 f"{frontend_url}/platforms"
-                f"?oauth_success=1"
+                f"?oauth_success=true"
                 f"&platform={platform}"
                 f"&count={len(platforms_created)}"
             )
@@ -496,7 +528,7 @@ class OAuthCallbackView(APIView):
             logger.error(f"OAuth token exchange failed: {e}", exc_info=True)
             redirect_url = (
                 f"{frontend_url}/platforms"
-                f"?oauth_error=1"
+                f"?oauth_error=true"
                 f"&platform={platform}"
                 f"&reason=token_exchange_failed"
             )
@@ -573,10 +605,12 @@ class OAuthCallbackView(APIView):
         
         params = {
             'access_token': access_token,
-            'fields': 'id,name,access_token,instagram_business_account,picture,fan_count'
+            'fields': 'id,name,access_token,instagram_business_account{id,username,name,profile_picture_url},picture,fan_count'
         }
         
         response = requests.get(url, params=params)
+        print(f"DEBUG _get_user_pages - Response Status: {response.status_code}")
+        print(f"DEBUG _get_user_pages - Response Body: {response.text}")
         response.raise_for_status()
         return response.json().get('data', [])
     
@@ -584,16 +618,27 @@ class OAuthCallbackView(APIView):
         """Create platform entries for pages"""
         platforms_created = []
         
+        # Calculate expiry datetime
+        expiry_dt = timezone.now() + timedelta(seconds=token_expiry)
+        
         for page in pages_data:
+            print(f"DEBUG _create_platforms - Processing page: {page.get('name')} ({page.get('id')})")
+            print(f"DEBUG _create_platforms - Instagram data found: {bool(page.get('instagram_business_account'))}")
+            if page.get('instagram_business_account'):
+                print(f"DEBUG _create_platforms - Instagram details: {page.get('instagram_business_account')}")
+            
             page_id = page['id']
             page_name = page['name']
             page_token = page['access_token']
             fan_count = page.get('fan_count', 0)
             
-            # For Instagram, also create Instagram platform if business account exists
+            # Create Instagram platform if business account exists and user chose instagram
             if platform_type == 'instagram' and page.get('instagram_business_account'):
-                ig_account = page['instagram_business_account']
-                ig_account_id = ig_account['id']
+                ig_info = page['instagram_business_account']
+                ig_account_id = ig_info['id']
+                ig_username = ig_info.get('username', ig_account_id)
+                ig_name = ig_info.get('name', ig_username)
+                ig_pic = ig_info.get('profile_picture_url', '')
                 
                 # Create or update Instagram platform
                 platform, created = Platform.objects.update_or_create(
@@ -601,8 +646,9 @@ class OAuthCallbackView(APIView):
                     name='instagram',
                     channel_id=ig_account_id,
                     defaults={
-                        'channel_url': f"https://instagram.com/{ig_account_id}",
-                        'channel_name': page_name,
+                        'channel_url': f"https://instagram.com/{ig_username}",
+                        'channel_name': ig_name,
+                        'profile_picture': ig_pic,
                         'is_active': True,
                         'metadata': {
                             'access_token': long_lived_token,
@@ -610,38 +656,64 @@ class OAuthCallbackView(APIView):
                             'page_id': page_id,
                             'page_name': page_name,
                             'instagram_account_id': ig_account_id,
-                            'token_expires_at': (
-                                timezone.now() + timedelta(seconds=token_expiry)
-                            ).isoformat(),
-                            'scopes': ['pages_show_list', 'pages_read_engagement']
+                            'instagram_username': ig_username,
+                            'token_expires_at': expiry_dt.isoformat(),
+                            'scopes': ['instagram_basic', 'instagram_manage_insights', 'pages_read_engagement']
                         }
                     }
                 )
                 platforms_created.append(platform)
-            
-            # Always create Facebook platform for the page
-            platform, created = Platform.objects.update_or_create(
-                user=user,
-                name='facebook',
-                channel_id=page_id,
-                defaults={
-                    'channel_url': f"https://facebook.com/{page_id}",
-                    'channel_name': page_name,
-                    'is_active': True,
-                    'metadata': {
-                        'access_token': long_lived_token,
-                        'page_access_token': page_token,
-                        'page_id': page_id,
-                        'page_name': page_name,
-                        'fan_count': fan_count,
-                        'token_expires_at': (
-                            timezone.now() + timedelta(seconds=token_expiry)
-                        ).isoformat(),
-                        'scopes': ['pages_show_list', 'pages_read_engagement']
+
+                # Create UserSocialAccount (required by background consumer)
+                UserSocialAccount.objects.update_or_create(
+                    user=user,
+                    platform='instagram',
+                    account_id=ig_account_id,
+                    defaults={
+                        'access_token': page_token,
+                        'account_name': ig_name,
+                        'token_expiry': expiry_dt,
+                        'is_token_valid': True,
+                        'scopes': ['instagram_basic', 'instagram_manage_insights', 'pages_read_engagement']
                     }
-                }
-            )
-            platforms_created.append(platform)
+                )
+            
+            # Create Facebook platform only if user chose facebook
+            if platform_type == 'facebook':
+                platform, created = Platform.objects.update_or_create(
+                    user=user,
+                    name='facebook',
+                    channel_id=page_id,
+                    defaults={
+                        'channel_url': f"https://facebook.com/{page_id}",
+                        'channel_name': page_name,
+                        'is_active': True,
+                        'metadata': {
+                            'access_token': long_lived_token,
+                            'page_access_token': page_token,
+                            'page_id': page_id,
+                            'page_name': page_name,
+                            'fan_count': fan_count,
+                            'token_expires_at': expiry_dt.isoformat(),
+                            'scopes': ['pages_show_list', 'pages_read_engagement', 'pages_read_user_content']
+                        }
+                    }
+                )
+                platforms_created.append(platform)
+
+                # Create UserSocialAccount (required by background consumer)
+                UserSocialAccount.objects.update_or_create(
+                    user=user,
+                    platform='facebook',
+                    account_id=page_id,
+                    defaults={
+                        'access_token': page_token,
+                        'account_name': page_name,
+                        'token_expiry': expiry_dt,
+                        'is_token_valid': True,
+                        'scopes': ['pages_show_list', 'pages_read_engagement', 'pages_read_user_content']
+                    }
+                )
         
         return platforms_created
 
