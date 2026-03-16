@@ -28,11 +28,16 @@ from django.conf import settings
 
 User = get_user_model()
 
-def send_otp_email(user, otp_code):
-    subject = "Your 2FA Verification Code"
-    message = f"Hello {user.first_name},\n\nYour verification code is: {otp_code}\n\nThis code will expire in 10 minutes."
+def send_otp_email(user, otp_code, subject=None, message=None):
+    if not subject:
+        subject = "Your Verification Code"
+    if not message:
+        message = f"Hello {user.first_name or user.username},\n\nYour verification code is: {otp_code}\n\nThis code will expire in 10 minutes."
+    
     from_email = settings.DEFAULT_FROM_EMAIL
     recipient_list = [user.email]
+    
+    print(f"DEBUG: Attempting to send email to {user.email} with code {otp_code}")
     
     try:
         sent = send_mail(subject, message, from_email, recipient_list)
@@ -40,10 +45,10 @@ def send_otp_email(user, otp_code):
             print(f"DEBUG: OTP {otp_code} sent to {user.email} from {from_email}")
             return True
         else:
-            print(f"DEBUG: Email sending failed (returned 0)")
+            print(f"DEBUG: Email sending failed (returned 0) for {user.email}")
             return False
     except Exception as e:
-        print(f"Error sending email: {e}")
+        print(f"Error sending email to {user.email}: {e}")
         return False
 
 
@@ -492,6 +497,108 @@ class Check2FAStatusView(APIView):
             return Response({"success": True, "two_factor_enabled": is_enabled})
         except User.DoesNotExist:
             return Response({"success": False, "message": "User not found"}, status=status.HTTP_404_NOT_FOUND)
+
+class ForgotPasswordView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        identifier = request.data.get("email") # Identifier can be email or username
+        print(f"DEBUG: ForgotPasswordView hit with identifier: {identifier}")
+        
+        if not identifier:
+            return Response({"success": False, "message": "Email or Username is required"}, status=status.HTTP_400_BAD_REQUEST)
+        
+        identifier = identifier.strip()
+        
+        try:
+            # Match LoginView logic: handle email or username
+            if '@' in identifier:
+                user = User.objects.get(email__iexact=identifier)
+            else:
+                user = User.objects.get(username__iexact=identifier)
+                
+            print(f"DEBUG: User found: {user.username} (Email: {user.email})")
+            
+            if not user.email:
+                print(f"DEBUG: User {user.username} has no email address set.")
+                return Response({"success": False, "message": "This account does not have an email address associated with it."}, status=status.HTTP_400_BAD_REQUEST)
+
+            account, _ = Account.objects.get_or_create(account_owner=user, defaults={'name': user.username})
+            
+            # Generate OTP
+            otp = str(random.randint(100000, 999999))
+            account.otp_code = otp
+            account.otp_expiry = timezone.now() + timedelta(minutes=10)
+            account.save()
+            print(f"DEBUG: OTP generated and saved for {user.username}: {otp}")
+            
+            # Send OTP email with specific subject
+            subject = "Password Reset Verification Code"
+            message = f"Hello {user.first_name or user.username},\n\nYour password reset verification code is: {otp}\n\nThis code will expire in 10 minutes."
+            
+            if send_otp_email(user, otp, subject=subject, message=message):
+                print(f"DEBUG: Forgot Password OTP sent successfully to {user.email}")
+                return Response({"success": True, "message": "Verification code sent to your email."})
+            else:
+                print(f"DEBUG: Failed to send Forgot Password OTP to {user.email}")
+                return Response({"success": False, "message": "Failed to send email. Please try again."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+                
+        except User.DoesNotExist:
+            print(f"DEBUG: No user found with identifier: {identifier}")
+            return Response({"success": False, "message": "No account found with this email/username."}, status=status.HTTP_404_NOT_FOUND)
+        except Exception as e:
+            print(f"DEBUG: Error in ForgotPasswordView for {identifier}: {e}")
+            return Response({"success": False, "message": f"An error occurred: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+class ResetPasswordView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        identifier = request.data.get("email") # Identifier can be email or username
+        otp = request.data.get("otp")
+        new_password = request.data.get("new_password")
+        
+        print(f"DEBUG: ResetPasswordView hit for: {identifier}")
+
+        if not identifier or not otp or not new_password:
+            return Response({"success": False, "message": "Email/Username, OTP and new password are required"}, status=status.HTTP_400_BAD_REQUEST)
+            
+        identifier = identifier.strip()
+
+        try:
+            if '@' in identifier:
+                user = User.objects.get(email__iexact=identifier)
+            else:
+                user = User.objects.get(username__iexact=identifier)
+                
+            account = getattr(user, 'owned_account', None)
+            
+            if not account or account.otp_code != otp or account.otp_expiry < timezone.now():
+                print(f"DEBUG: Invalid or expired OTP for {identifier}")
+                return Response({"success": False, "message": "Invalid or expired verification code"}, status=status.HTTP_400_BAD_REQUEST)
+            
+            if len(new_password) < 8:
+                return Response({"success": False, "message": "Password must be at least 8 characters long"}, status=status.HTTP_400_BAD_REQUEST)
+                
+            user.set_password(new_password)
+            user.save()
+            print(f"DEBUG: Password reset successful for {user.username}")
+            
+            # Clear OTP after successful reset
+            account.otp_code = None
+            account.otp_expiry = None
+            # Increment jwt_version to invalidate existing tokens
+            account.jwt_version += 1
+            account.save()
+            
+            return Response({"success": True, "message": "Password reset successfully. You can now log in."})
+            
+        except User.DoesNotExist:
+            print(f"DEBUG: User not found during reset: {identifier}")
+            return Response({"success": False, "message": "User not found"}, status=status.HTTP_404_NOT_FOUND)
+        except Exception as e:
+            print(f"DEBUG: Error in ResetPasswordView for {identifier}: {e}")
+            return Response({"success": False, "message": f"An error occurred: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 class AccountMemberListView(APIView):
     permission_classes = [IsAuthenticated]
