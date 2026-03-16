@@ -16,9 +16,12 @@ def add_to_sentiment_quene(data, keyword="N/A"):
         print("Kafka producer is not initialized.")
         return
     
-    for post in data:
-        post["keyword"] = keyword
-        print(f"Sending post to Kafka: {post.get('post_id')}")
-        sentiment_producer.send(settings.KAFKA_SENTIMENT_TOPIC, post)
+    with open("producer_debug.log", "a") as f:
+        f.write(f"\n--- Batch for keyword: {keyword} ---\n")
+        for post in data:
+            post["keyword"] = keyword
+            pid = post.get('post_id')
+            f.write(f"Sending post: {pid} | Keyword: {keyword}\n")
+            sentiment_producer.send(settings.KAFKA_SENTIMENT_TOPIC, post)
     
     sentiment_producer.flush()
