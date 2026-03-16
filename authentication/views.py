@@ -52,6 +52,17 @@ def send_otp_email(user, otp_code, subject=None, message=None):
         return False
 
 
+def get_user_avatar_url(request, user):
+    """Helper to get absolute avatar URL for a user."""
+    account = getattr(user, 'owned_account', None)
+    if account and account.avatar:
+        try:
+            return request.build_absolute_uri(account.avatar.url)
+        except Exception as e:
+            print(f"DEBUG: Error building avatar URI: {e}")
+    return None
+
+
 class LoginView(TokenObtainPairView):
     serializer_class = CustomTokenObtainPairSerializer
     def post(self, request, *args, **kwargs):
@@ -96,6 +107,7 @@ class LoginView(TokenObtainPairView):
                     "first_name": user.first_name,
                     "last_name": user.last_name,
                     "username": user.username,
+                    "avatar": get_user_avatar_url(request, user)
                 }
             except User.DoesNotExist:
                 user_data = {}
@@ -157,6 +169,7 @@ class SignupView(APIView):
                 "first_name": user.first_name,
                 "last_name": user.last_name,
                 "username": user.username,
+                "avatar": get_user_avatar_url(request, user)
             }
 
             response = Response(
@@ -217,7 +230,8 @@ class VerifyAuth(APIView):
             "last_name": user.last_name,
             "username": user.username,
             "role": role_name,
-            "permissions": permissions
+            "permissions": permissions,
+            "avatar": get_user_avatar_url(request, user)
         }
         return Response(
             {"success": True, "message": "User Authenticated", "data": user_data}, 200
@@ -416,7 +430,8 @@ class LoginVerify2FAView(APIView):
                     "last_name": user.last_name,
                     "username": user.username,
                     "role": role_name,
-                    "permissions": permissions
+                    "permissions": permissions,
+                    "avatar": get_user_avatar_url(request, user)
                 }
                 
                 response = Response({
