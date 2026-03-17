@@ -6,12 +6,13 @@ from .views import (
     SecurityQuestionListView, SetupSecurityQuestionsView, Check2FAStatusView,
     AccountMemberListView, AccountRoleListView, UpdateMemberRoleView, RemoveMemberView,
     InviteMemberView, AcceptInvitationView, InvitationDetailView, ProcessInvitationView,
-    AvatarUploadView, ForgotPasswordView, ResetPasswordView
+    AvatarUploadView, ForgotPasswordView, ResetPasswordView, SocialAuthView
 )
 
 urlpatterns = [
     path("signup/", SignupView.as_view(), name="signup"),
     path("login/", LoginView.as_view(), name="login"),
+    path("social-auth/", SocialAuthView.as_view(), name="social-auth"),
     path("logout/", LogoutView.as_view(), name="logout"),
     path("forgot-password/", ForgotPasswordView.as_view(), name="forgot-password"),
     path("reset-password/", ResetPasswordView.as_view(), name="reset-password"),

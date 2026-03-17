@@ -1,5 +1,7 @@
 from rest_framework.views import APIView
 from rest_framework.response import Response
+import requests
+import logging
 from django.utils.crypto import get_random_string
 
 from rest_framework.permissions import IsAuthenticated
@@ -917,3 +919,130 @@ class AvatarUploadView(APIView):
             "message": "Avatar uploaded successfully",
             "data": {"avatar": avatar_url}
         })
+
+
+logger = logging.getLogger(__name__)
+
+class SocialAuthView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        provider = request.data.get('provider')
+        code = request.data.get('code')
+
+        if not provider or not code:
+            return Response({"success": False, "message": "Provider and code are required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            user_info = self.get_user_info(provider, code)
+            if not user_info or not user_info.get('email'):
+                logger.error(f"Social Auth Error: Failed to get user info or email from {provider}. Info: {user_info}")
+                return Response({"success": False, "message": f"Failed to authenticate with {provider}"}, status=status.HTTP_401_UNAUTHORIZED)
+
+            email = user_info['email']
+            first_name = user_info.get('given_name') or user_info.get('first_name') or user_info.get('name', '').split(' ')[0]
+            last_name = user_info.get('family_name') or user_info.get('last_name') or (' '.join(user_info.get('name', '').split(' ')[1:]) if ' ' in user_info.get('name', '') else '')
+            
+            user, created = User.objects.get_or_create(email=email, defaults={
+                'username': email,
+                'first_name': first_name,
+                'last_name': last_name,
+            })
+
+            if created:
+                user.set_unusable_password()
+                user.save()
+                # Create Account for the user
+                Account.objects.get_or_create(account_owner=user, defaults={'name': f"{first_name} {last_name}"})
+
+            # Generate tokens
+            refresh = RefreshToken.for_user(user)
+            
+            # Get account data
+            user_data = {
+                "id": user.id,
+                "email": user.email,
+                "first_name": user.first_name,
+                "last_name": user.last_name,
+                "username": user.username,
+                "avatar": get_user_avatar_url(request, user)
+            }
+
+            return Response({
+                "success": True,
+                "message": f"{provider.capitalize()} login successful",
+                "data": {
+                    "access": str(refresh.access_token),
+                    "refresh": str(refresh),
+                    "user": user_data
+                }
+            })
+
+        except Exception as e:
+            logger.error(f"Social Auth Error ({provider}): {str(e)}", exc_info=True)
+            return Response({"success": False, "message": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    def get_user_info(self, provider, code):
+        if provider == 'google':
+            return self.get_google_user_info(code)
+        elif provider == 'facebook':
+            return self.get_facebook_user_info(code)
+        elif provider == 'linkedin':
+            return self.get_linkedin_user_info(code)
+        return None
+
+    def get_google_user_info(self, code):
+        token_url = "https://oauth2.googleapis.com/token"
+        data = {
+            'client_id': settings.GOOGLE_CLIENT_ID,
+            'client_secret': settings.GOOGLE_CLIENT_SECRET,
+            'code': code,
+            'grant_type': 'authorization_code',
+            'redirect_uri': settings.GOOGLE_REDIRECT_URI
+        }
+        res = requests.post(token_url, data=data)
+        token_data = res.json()
+        if 'access_token' not in token_data:
+            logger.error(f"Google Token Error: {token_data}")
+            return None
+        
+        user_info_res = requests.get("https://www.googleapis.com/oauth2/v3/userinfo", 
+                                     headers={'Authorization': f"Bearer {token_data['access_token']}"})
+        return user_info_res.json()
+
+    def get_facebook_user_info(self, code):
+        token_url = f"https://graph.facebook.com/{settings.FACEBOOK_API_VERSION}/oauth/access_token"
+        params = {
+            'client_id': settings.FACEBOOK_APP_ID,
+            'client_secret': settings.FACEBOOK_APP_SECRET,
+            'code': code,
+            'redirect_uri': settings.FACEBOOK_LOGIN_REDIRECT_URI
+        }
+        res = requests.get(token_url, params=params)
+        token_data = res.json()
+        if 'access_token' not in token_data:
+            logger.error(f"Facebook Token Error: {token_data}")
+            return None
+            
+        user_info_res = requests.get(f"https://graph.facebook.com/me?fields=id,name,email,picture&access_token={token_data['access_token']}")
+        return user_info_res.json()
+
+    def get_linkedin_user_info(self, code):
+        token_url = "https://www.linkedin.com/oauth/v2/accessToken"
+        data = {
+            'grant_type': 'authorization_code',
+            'code': code,
+            'client_id': settings.LINKEDIN_CLIENT_ID,
+            'client_secret': settings.LINKEDIN_CLIENT_SECRET,
+            'redirect_uri': settings.LINKEDIN_REDIRECT_URI
+        }
+        res = requests.post(token_url, data=data)
+        token_data = res.json()
+        if 'access_token' not in token_data:
+            logger.error(f"LinkedIn Token Error: {token_data}")
+            return None
+            
+        # LinkedIn userinfo endpoint (OpenID Connect)
+        user_info_res = requests.get("https://api.linkedin.com/v2/userinfo", 
+                                     headers={'Authorization': f"Bearer {token_data['access_token']}"})
+        return user_info_res.json()
