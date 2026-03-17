@@ -57,7 +57,8 @@ print(f"Started the consumer on topic: {settings.KAFKA_SENTIMENT_TOPIC}")
 
 for msg in sentiment_consumer:
     data = msg.value
-    print(f"Processing post: {data.get('post_id')}")
+    keyword = data.get('keyword', 'N/A')
+    print(f"Processing post: {data.get('post_id')} for keyword: {keyword}")
 
     try:
         platform_post_id = data.get("post_id") or f"unknown_{uuid.uuid4()}"
@@ -116,7 +117,7 @@ for msg in sentiment_consumer:
 
         Sentiment.objects.update_or_create(
             post=post_obj,
-            keyword=data.get("keyword") or "N/A",
+            keyword=(data.get("keyword") or "N/A").strip(),
             defaults={
                 "sentiment_label": analysis["sentiment"],
                 "confidence_score": analysis["confidence_score"],

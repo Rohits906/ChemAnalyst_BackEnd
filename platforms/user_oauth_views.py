@@ -377,12 +377,12 @@ class InstagramUserOAuthInitiateView(APIView):
                 redirect_uri = redirect_uri.replace("127.0.0.1", "localhost")
             
             # OAuth scopes for Instagram
-            # Works for both personal & business accounts
+            # Strictly for Business accounts which require a linked Facebook Page
             scopes = [
-                'instagram_basic',        # Basic profile access
-                # 'instagram_insights',     # Analytics & insights
-                'pages_read_engagement',  # For connected pages
-                # 'pages_read_user_content', # Page content access
+                'instagram_basic',
+                'instagram_manage_insights',
+                'pages_read_engagement',
+                'pages_show_list',
             ]
             
             # Build auth URL (Instagram uses Facebook's OAuth endpoint)
@@ -597,7 +597,7 @@ class InstagramUserOAuthCallbackView(APIView):
                     'profile_picture_url': profile_picture,
                     'token_expiry': token_expiry,
                     'is_token_valid': True,
-                    'scopes': ['instagram_basic'],
+                    'scopes': ['instagram_basic', 'instagram_manage_insights', 'pages_read_engagement', 'pages_show_list'],
                     'api_calls_made': 0,
                     'api_calls_limit': 1000,  # Free tier
                 }

@@ -29,7 +29,7 @@ class UserSocialAccount(models.Model):
     account_id = models.CharField(max_length=255)
     account_name = models.CharField(max_length=255)
     account_email = models.CharField(max_length=255, blank=True)
-    profile_picture_url = models.URLField(blank=True)
+    profile_picture_url = models.URLField(max_length=2000, blank=True)
     
     # Permission tracking
     scopes = models.JSONField(default=list)  # Granted scopes/permissions
@@ -86,8 +86,8 @@ class Platform(models.Model):
     name = models.CharField(max_length=50, choices=PLATFORM_CHOICES)
     channel_id = models.CharField(max_length=255)
     channel_name = models.CharField(max_length=255)
-    channel_url = models.URLField(max_length=500)
-    profile_picture = models.URLField(max_length=500, blank=True)
+    channel_url = models.URLField(max_length=2000)
+    profile_picture = models.URLField(max_length=2000, blank=True)
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="platforms")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -152,7 +152,7 @@ class ChannelPost(models.Model):
     platform_post_id = models.CharField(max_length=255)
     title = models.CharField(max_length=500, blank=True)
     content = models.TextField(blank=True)
-    post_url = models.URLField(max_length=500)
+    post_url = models.URLField(max_length=2000)
     
     # Media
     media_urls = models.JSONField(default=list)  # Array of media URLs
