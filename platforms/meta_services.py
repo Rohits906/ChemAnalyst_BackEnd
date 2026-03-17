@@ -1,4 +1,5 @@
 import requests
+import json
 import logging
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
@@ -53,13 +54,25 @@ class MetaBaseService:
                         params['access_token'] = self.access_token
                         response = requests.get(url, params=params, timeout=30)
             
-            response.raise_for_status()
+            if response.status_code >= 400:
+                try:
+                    error_data = response.json()
+                    logger.error(f"Meta API Error ({response.status_code}): {json.dumps(error_data)}")
+                except:
+                    logger.error(f"Meta API Error ({response.status_code}): {response.text}")
+                response.raise_for_status()
             return response.json()
             
         except requests.exceptions.RequestException as e:
-            logger.error(f"Meta API request failed: {e}")
-            if hasattr(e, 'response') and e.response:
-                logger.error(f"Response: {e.response.text}")
+            # The error might have already been logged above, but let's be sure
+            try:
+                if e.response is not None:
+                    error_json = e.response.json()
+                    logger.error(f"Meta API request exception: {e}. Body: {json.dumps(error_json)}")
+                else:
+                    logger.error(f"Meta API request exception: {e}")
+            except:
+                logger.error(f"Meta API request exception: {e}")
             raise
     
     def _refresh_token(self):
@@ -144,6 +157,15 @@ class FacebookService(MetaBaseService):
             except Exception as ie:
                 logger.warning(f"Could not fetch Facebook insights: {ie}")
 
+            # Aggregate likes and comments from recent posts
+            fb_posts = self._make_request(f"{self.page_id}/posts", params={'fields': 'likes.summary(true),comments.summary(true)', 'limit': 100})
+            posts_list = fb_posts.get('data', [])
+            total_likes = 0
+            total_comments = 0
+            for post in posts_list:
+                total_likes += post.get('likes', {}).get('summary', {}).get('total_count', 0)
+                total_comments += post.get('comments', {}).get('summary', {}).get('total_count', 0)
+
             channel_info = {
                 'channel_id': data.get('id'),
                 'channel_name': data.get('name', ''),
@@ -153,7 +175,9 @@ class FacebookService(MetaBaseService):
                 'category': data.get('category', ''),
                 'followers': data.get('followers_count', data.get('fan_count', 0)),
                 'talking_about': data.get('talking_about_count', 0),
-                'posts_count': len(self._make_request(f"{self.page_id}/posts", params={'limit': 100}).get('data', [])) if self.page_id else 0,
+                'posts_count': len(posts_list),
+                'total_likes': total_likes,
+                'total_comments': total_comments,
                 'total_reach': total_reach,
                 'total_engagement': total_engagement,
                 'verified': data.get('verification_status', 'not_verified') == 'verified',
@@ -378,6 +402,17 @@ class InstagramService(MetaBaseService):
             except Exception as ie:
                 logger.warning(f"Could not fetch Instagram account insights: {ie}")
 
+            # Calculate total likes/comments from recent posts
+            media_data = self._make_request(
+                f"{self.instagram_account_id}/media",
+                params={'fields': 'like_count,comments_count', 'limit': 50}
+            )
+            total_likes = 0
+            total_comments = 0
+            for post in media_data.get('data', []):
+                total_likes += post.get('like_count', 0)
+                total_comments += post.get('comments_count', 0)
+
             channel_info = {
                 'channel_id': data.get('id'),
                 'channel_name': data.get('username', ''),
@@ -388,6 +423,8 @@ class InstagramService(MetaBaseService):
                 'followers': data.get('followers_count', 0),
                 'following': data.get('follows_count', 0),
                 'posts_count': data.get('media_count', 0),
+                'total_likes': total_likes,
+                'total_comments': total_comments,
                 'total_reach': total_reach,
                 'total_impressions': total_impressions,
             }
@@ -405,9 +442,8 @@ class InstagramService(MetaBaseService):
             until = timezone.now().strftime('%Y-%m-%d')
             
             metrics = [
-                'reach', 'impressions', 'profile_views',
-                'email_contacts', 'phone_calls', 'text_messages',
-                'website_clicks', 'follower_count'
+                'reach', 'follower_count', 'website_clicks', 
+                'profile_views', 'total_interactions'
             ]
             
             data = self._make_request(

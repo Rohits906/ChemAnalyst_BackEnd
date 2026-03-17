@@ -29,6 +29,7 @@ INSTALLED_APPS = [
     "platforms",
     "sentiment",
     "reports",
+    "django_celery_beat",
 ]
 # AUTH_USER_MODEL = "authentication.User"
 
@@ -133,6 +134,37 @@ TWITTER_API_VERSION = "v2"
 # System pre-configured Meta credentials (for system-connect feature)
 FACEBOOK_PAGE_ID = config("FACEBOOK_PAGE_ID", default="")
 FACEBOOK_PAGE_ACCESS_TOKEN = config("FACEBOOK_PAGE_ACCESS_TOKEN", default="")
+
+# Celery and Redis settings
+CELERY_BROKER_URL = config("CELERY_BROKER_URL", default="redis://localhost:6379/0")
+CELERY_RESULT_BACKEND = config("CELERY_RESULT_BACKEND", default="redis://localhost:6379/0")
+CELERY_ACCEPT_CONTENT = ["json"]
+CELERY_TASK_SERIALIZER = "json"
+CELERY_RESULT_SERIALIZER = "json"
+CELERY_TIMEZONE = TIME_ZONE
+CELERY_BEAT_SCHEDULE = {
+    'fetch-all-platforms-hourly': {
+        'task': 'platforms.tasks.trigger_all_platforms_sync',
+        'schedule': timedelta(hours=1),
+        'args': (),
+    },
+    'fetch-all-sentiment-hourly': {
+        'task': 'sentiment.tasks.trigger_all_sentiment_sync',
+        'schedule': timedelta(hours=1),
+        'args': (),
+    },
+}
+
+# Redis Cache for distributed locking
+CACHES = {
+    "default": {
+        "BACKEND": "django_redis.cache.RedisCache",
+        "LOCATION": config("REDIS_URL", default="redis://localhost:6379/1"),
+        "OPTIONS": {
+            "CLIENT_CLASS": "django_redis.client.DefaultClient",
+        }
+    }
+}
 
 
 # KAFKA CONFIG
