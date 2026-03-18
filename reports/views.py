@@ -99,7 +99,7 @@ def export_report(request, platform, file_type):
 
         if file_type == "json":
             response = HttpResponse(
-                json.dumps(report_data, indent=4),
+                json.dumps(report_data, indent=4, ensure_ascii=False),
                 content_type="application/json",
             )
             response["Content-Disposition"] = f"attachment; filename={platform}_report.json"
@@ -108,7 +108,7 @@ def export_report(request, platform, file_type):
         elif file_type == "csv":
             response = HttpResponse(content_type="text/csv")
             response["Content-Disposition"] = f"attachment; filename={platform}_report.csv"
-            df.to_csv(response, index=False)
+            df.to_csv(response, index=False, encoding='utf-8-sig')
             return response
 
         elif file_type == "excel":
