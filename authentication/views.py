@@ -25,7 +25,11 @@ from django.utils import timezone
 from datetime import timedelta
 import random
 import uuid
+import requests
 from django.conf import settings
+from django.db import transaction
+from django.contrib.auth import login as django_login
+from urllib.parse import urlencode
 
 
 User = get_user_model()
@@ -919,7 +923,6 @@ class AvatarUploadView(APIView):
             "message": "Avatar uploaded successfully",
             "data": {"avatar": avatar_url}
         })
-
 
 logger = logging.getLogger(__name__)
 

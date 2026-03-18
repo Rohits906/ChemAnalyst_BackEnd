@@ -11,7 +11,7 @@ from rest_framework.response import Response
 from datetime import datetime, timedelta
 from .models import SentimentPost, User_Keyword, Sentiment
 from .serializers import UserKeywordSerializer, UserSentimentSerializer
-from .producers import add_to_sentiment_quene
+from .producers import add_to_sentiment_queue
 from platforms.models import UserSocialAccount
 
 # Setup logging
@@ -491,7 +491,7 @@ class SocialMediaSearchView(APIView):
         keyword = keyword.strip()
         search_logger.info(f"Starting search for keyword: '{keyword}', hours: {hours}")
         all_posts = []
-        current_id = 1
+        current_idd = 1
         
         twitter_raw = self._fetch_twitter(keyword, hours=hours)
         print(f"DEBUG: Fetched {len(twitter_raw)} posts from Twitter")
@@ -499,7 +499,7 @@ class SocialMediaSearchView(APIView):
             text = post.get("text", "")
             all_posts.append(
                 {
-                    "id": current_id,
+                    "id": current_idd,
                     "post_id": post.get("id"),
                     "post_title": text[:50] + "..." if len(text) > 50 else text,
                     "post_text": text,
@@ -587,72 +587,6 @@ class SocialMediaSearchView(APIView):
                 }
             )
             current_idd += 1
-
-        facebook_raw = self._fetch_facebook(keyword, user=user)
-        for post in facebook_raw:
-            text = post.get("text") or ""
-            # Use real location from Facebook 'place' field if available, else fall back to heuristic
-            fb_location = post.get("location", "")
-            fb_lat = None
-            fb_lng = None
-            fb_loc_name = fb_location if fb_location else ""
-            fb_loc_type = "city"
-            all_posts.append(
-                {
-                    "id": current_idd,
-                    "post_id": post.get("id"),
-                    "post_title": text[:50] + "..." if len(text) > 50 else text,
-                    "post_text": text,
-                    "post_url": post.get("permalink"),
-                    "platform": "twitter",
-                    "author": post.get("author", ""),
-                    "published_at": post.get("created_at"),
-                    "extra_details": {},
-                }
-            )
-            current_id += 1
-
-        # Fetch from Instagram
-        instagram_raw = self._fetch_instagram(keyword, hours=hours)
-        print(f"DEBUG: Fetched {len(instagram_raw)} posts from Instagram")
-        for post in instagram_raw:
-            caption = post.get("caption", "")
-            all_posts.append(
-                {
-                    "id": current_id,
-                    "post_id": post.get("id"),
-                    "post_title": caption[:50].replace("\n", " ") if caption else "Instagram Post",
-                    "post_text": caption,
-                    "post_url": post.get("permalink"),
-                    "platform": "instagram",
-                    "author": post.get("username", ""), 
-                    "published_at": post.get("timestamp"),
-                    "extra_details": {
-                        "media_type": post.get("media_type"),
-                        "media_url": post.get("media_url"),
-                    },
-                }
-            )
-            current_idd += 1
-
-        # Fetch from YouTube
-        youtube_raw = self._fetch_youtube(keyword, hours=hours)
-        print(f"DEBUG: Fetched {len(youtube_raw)} posts from YouTube")
-        for post in youtube_raw:
-            all_posts.append(
-                {
-                    "id": current_id,
-                    "post_id": post.get("id"),
-                    "post_title": post.get("title"),
-                    "post_text": post.get("description"),
-                    "post_url": post.get("permalink"),
-                    "platform": "youtube",
-                    "author": post.get("author"),
-                    "published_at": post.get("published_at"),
-                    "extra_details": post.get("extra_details", {}),
-                }
-            )
-            current_idd += 1
         
         # Hours filter
         if hours:
@@ -665,9 +599,21 @@ class SocialMediaSearchView(APIView):
                     if pub_at:
                         try:
                             if isinstance(pub_at, str):
-                                dt = datetime.fromisoformat(pub_at.replace("Z", "+00:00"))
+                                # Replace 'Z' with +00:00 for fromisoformat
+                                clean_pub_at = pub_at.replace("Z", "+00:00")
+                                # Some formats might have space or extra chars
+                                if "T" not in clean_pub_at and " " in clean_pub_at:
+                                    dt = datetime.strptime(clean_pub_at, "%Y-%m-%d %H:%M:%S%z")
+                                else:
+                                    dt = datetime.fromisoformat(clean_pub_at)
                             else:
                                 dt = pub_at
+                            
+                            # Ensure dt is aware
+                            if dt.tzinfo is None:
+                                from django.utils.timezone import make_aware
+                                dt = make_aware(dt)
+                                
                             if dt >= time_threshold:
                                 filtered_posts.append(p)
                         except (ValueError, TypeError):
@@ -678,7 +624,7 @@ class SocialMediaSearchView(APIView):
             except ValueError:
                 pass
 
-        add_to_sentiment_quene(all_posts, keyword=keyword)
+        add_to_sentiment_queue(all_posts, keyword=keyword)
         
         # Platform counts
         yt_count = len([p for p in all_posts if p['platform'] == 'youtube'])

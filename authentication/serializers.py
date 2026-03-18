@@ -97,3 +97,5 @@ class AccountMemberSerializer(serializers.ModelSerializer):
     class Meta:
         model = AccountMember
         fields = ["id", "user", "role", "role_id", "joined_at", "is_accepted"]
+        model = AccountMember
+        fields = ["id", "user", "role", "role_id", "joined_at", "is_accepted"]
