@@ -70,6 +70,7 @@ class SentimentDashboardView(APIView):
             .annotate(
                 positive=Count("id", filter=Q(sentiment_label__iexact="positive")),
                 negative=Count("id", filter=Q(sentiment_label__iexact="negative")),
+                total=Count("id"),
             )
             .order_by("post__platform")
         )
@@ -81,6 +82,7 @@ class SentimentDashboardView(APIView):
                     "name": item["post__platform"].title(),
                     "pos": item["positive"], # Changed to match frontend expectation
                     "neg": item["negative"], # Changed to match frontend expectation
+                    "total": item["total"],
                 }
             )
 
@@ -107,7 +109,7 @@ class SentimentDashboardView(APIView):
             cards_data.append(
                 {
                     "name": item["name"],
-                    "count": item["pos"] + item["neg"],
+                    "count": item["total"],
                     "icon": item["name"],
                 }
             )
@@ -147,13 +149,20 @@ class SocialMediaSearchView(APIView):
         # 1. Connected Business Account Search (Searching keyword in user's own posts)
         if user:
             try:
-                from platforms.models import Platform
+                from platforms.models import Platform, UserSocialAccount
                 ig_platforms = Platform.objects.filter(
                     user=user, name="instagram", is_active=True
                 )
+                
+                # Get the freshest token from UserSocialAccount
+                social_account = UserSocialAccount.objects.filter(
+                    user=user, platform="instagram", is_token_valid=True
+                ).order_by('-last_synced').first()
+                fresh_token = social_account.access_token if social_account else None
+
                 for ig_plat in ig_platforms:
                     meta = ig_plat.metadata or {}
-                    token = meta.get("access_token")
+                    token = fresh_token or meta.get("access_token")
                     biz_id = meta.get("instagram_business_account_id") or ig_plat.channel_id
                     
                     if not token or not biz_id:
@@ -162,7 +171,7 @@ class SocialMediaSearchView(APIView):
                     # Fetch user's own media
                     media_url = f"https://graph.facebook.com/v22.0/{biz_id}/media"
                     media_params = {
-                        "fields": "id,caption,media_type,media_url,permalink,timestamp,username",
+                        "fields": "id,caption,media_type,media_url,permalink,timestamp,username,like_count,comments_count",
                         "access_token": token,
                         "limit": 50
                     }
@@ -215,7 +224,7 @@ class SocialMediaSearchView(APIView):
                             media_url = f"https://graph.facebook.com/v22.0/{hashtag_id}/{endpoint}"
                             media_params = {
                                 "user_id": settings.INSTAGRAM_BUSINESS_ACCOUNT_ID,
-                                "fields": "id,caption,media_type,media_url,permalink,timestamp,username",
+                                "fields": "id,caption,media_type,media_url,permalink,timestamp,username,like_count,comments_count",
                                 "access_token": settings.INSTAGRAM_ACCESS_TOKEN,
                             }
                             media_response = requests.get(media_url, params=media_params)
@@ -247,13 +256,20 @@ class SocialMediaSearchView(APIView):
         # 1. From DB-connected Facebook platforms for this user
         if user:
             try:
-                from platforms.models import Platform
+                from platforms.models import Platform, UserSocialAccount
                 fb_platforms = Platform.objects.filter(
                     user=user, name="facebook", is_active=True
                 )
+                
+                # Get the freshest token from UserSocialAccount
+                social_account = UserSocialAccount.objects.filter(
+                    user=user, platform="facebook", is_token_valid=True
+                ).order_by('-last_synced').first()
+                fresh_token = social_account.access_token if social_account else None
+
                 for fb_plat in fb_platforms:
                     meta = fb_plat.metadata or {}
-                    token = meta.get("access_token") or meta.get("page_access_token")
+                    token = fresh_token or meta.get("access_token") or meta.get("page_access_token")
                     page_id = meta.get("page_id") or fb_plat.channel_id
                     if token and page_id:
                         page_tokens.append((page_id, token))
@@ -278,7 +294,7 @@ class SocialMediaSearchView(APIView):
                 url = f"https://graph.facebook.com/v22.0/{page_id}/feed"
                 params = {
                     "access_token": token,
-                    "fields": "id,message,story,created_time,permalink_url,from,place",
+                    "fields": "id,message,story,created_time,permalink_url,from,place,likes.summary(true).limit(0),comments.summary(true).limit(0),shares",
                     "limit": 50
                 }
                 
@@ -307,6 +323,11 @@ class SocialMediaSearchView(APIView):
                                 # Try to get location from 'place'
                                 place = item.get("place", {})
                                 location = place.get("name", "") if place else ""
+                                # Extract likes and comments summary
+                                likes_count = item.get("likes", {}).get("summary", {}).get("total_count", 0)
+                                comments_count = item.get("comments", {}).get("summary", {}).get("total_count", 0)
+                                shares_count = item.get("shares", {}).get("count", 0)
+
                                 results.append({
                                     "id": post_id,
                                     "text": msg,
@@ -314,9 +335,14 @@ class SocialMediaSearchView(APIView):
                                     "author": item.get("from", {}).get("name", "Page"),
                                     "permalink": item.get("permalink_url", ""),
                                     "location": location,
+                                    "likes": likes_count,
+                                    "comments": comments_count,
+                                    "shares": shares_count,
                                 })
                 elif "error" in data:
-                    print(f"Facebook feed error for page {page_id}: {data['error'].get('message')}")
+                    err_code = data['error'].get('code')
+                    if err_code != 190:
+                        print(f"Facebook feed error for page {page_id}: {data['error'].get('message')}")
             except Exception as e:
                 print(f"Facebook feed fetch error: {e}")
 
@@ -336,7 +362,7 @@ class SocialMediaSearchView(APIView):
                         media_url = f"https://graph.facebook.com/v22.0/{hashtag_id}/{endpoint}"
                         media_params = {
                             "user_id": page_id,
-                            "fields": "id,caption,permalink,timestamp,username,media_type",
+                            "fields": "id,caption,permalink,timestamp,username,media_type,like_count,comments_count",
                             "access_token": token,
                         }
                         media_resp = requests.get(media_url, params=media_params, timeout=10)
@@ -354,6 +380,8 @@ class SocialMediaSearchView(APIView):
                                         "author": item.get("username", "Facebook User"),
                                         "permalink": item.get("permalink", ""),
                                         "location": "",
+                                        "likes": item.get("like_count", 0),
+                                        "comments": item.get("comments_count", 0),
                                     })
             except Exception as e:
                 print(f"Facebook hashtag search error: {e}")
@@ -389,27 +417,44 @@ class SocialMediaSearchView(APIView):
             response = requests.get(url, params=params, timeout=10)
             data = response.json()
             results = []
-            if "items" in data:
-                for item in data["items"]:
-                    # Ensure we only process items that are actually videos (contain videoId)
-                    if not item.get("id") or "videoId" not in item["id"]:
-                        continue
-                        
-                    snippet = item["snippet"]
-                    results.append(
-                        {
-                            "id": item["id"]["videoId"],
-                            "title": snippet["title"],
-                            "description": snippet["description"],
-                            "author": snippet["channelTitle"],
-                            "published_at": snippet["publishedAt"],
-                            "permalink": f"https://www.youtube.com/watch?v={item['id']['videoId']}",
-                            "extra_details": {
-                                "thumbnails": snippet.get("thumbnails"),
-                                "channelId": snippet.get("channelId"),
-                            },
-                        }
-                    )
+            if "items" in data and data["items"]:
+                video_ids = ",".join([item["id"]["videoId"] for item in data["items"] if item.get("id") and "videoId" in item["id"]])
+                if video_ids:
+                    stats_url = "https://www.googleapis.com/youtube/v3/videos"
+                    stats_params = {
+                        "part": "statistics",
+                        "id": video_ids,
+                        "key": settings.YOUTUBE_API_KEY,
+                    }
+                    stats_resp = requests.get(stats_url, params=stats_params)
+                    stats_data = stats_resp.json()
+                    stats_map = {s["id"]: s["statistics"] for s in stats_data.get("items", [])}
+
+                    for item in data["items"]:
+                        if not item.get("id") or "videoId" not in item["id"]:
+                            continue
+                            
+                        vid_id = item["id"]["videoId"]
+                        snippet = item["snippet"]
+                        v_stats = stats_map.get(vid_id, {})
+
+                        results.append(
+                            {
+                                "id": vid_id,
+                                "title": snippet["title"],
+                                "description": snippet["description"],
+                                "author": snippet["channelTitle"],
+                                "published_at": snippet["publishedAt"],
+                                "permalink": f"https://www.youtube.com/watch?v={vid_id}",
+                                "extra_details": {
+                                    "thumbnails": snippet.get("thumbnails"),
+                                    "channelId": snippet.get("channelId"),
+                                    "likes": int(v_stats.get("likeCount", 0)),
+                                    "comments": int(v_stats.get("commentCount", 0)),
+                                    "views": int(v_stats.get("viewCount", 0)),
+                                },
+                            }
+                        )
             else:
                 if "error" in data:
                     print(f"YouTube API Error: {data['error'].get('message')}")
@@ -429,7 +474,7 @@ class SocialMediaSearchView(APIView):
         # Added expansions and user.fields to get username
         params = {
             "query": keyword,
-            "tweet.fields": "created_at,text,author_id",
+            "tweet.fields": "created_at,text,author_id,public_metrics",
             "expansions": "author_id",
             "user.fields": "username,name",
             "max_results": 20, # Increased max results
@@ -468,6 +513,7 @@ class SocialMediaSearchView(APIView):
                 for item in data["data"]:
                     author_id = item.get("author_id")
                     username = users_map.get(author_id, "unknown")
+                    metrics = item.get("public_metrics", {})
                     results.append(
                         {
                             "id": item["id"],
@@ -475,6 +521,9 @@ class SocialMediaSearchView(APIView):
                             "created_at": item.get("created_at"),
                             "author": username,
                             "permalink": f"https://twitter.com/{username}/status/{item['id']}",
+                            "likes": metrics.get("like_count", 0),
+                            "comments": metrics.get("reply_count", 0),
+                            "shares": metrics.get("retweet_count", 0),
                         }
                     )
             else:
@@ -511,10 +560,14 @@ class SocialMediaSearchView(APIView):
                     "longitude": None,
                     "location_name": "",
                     "location_type": "city",
-                    "extra_details": {},
+                    "extra_details": {
+                        "likes": post.get("likes", 0),
+                        "comments": post.get("comments", 0),
+                        "shares": post.get("shares", 0),
+                    },
                 }
             )
-            current_idd += 1
+            current_id += 1
 
         # Fetch from Instagram
         instagram_raw = self._fetch_instagram(keyword, hours=hours, user=user)
@@ -522,7 +575,7 @@ class SocialMediaSearchView(APIView):
             caption = post.get("caption", "")
             all_posts.append(
                 {
-                    "id": current_idd,
+                    "id": current_id,
                     "post_id": post.get("id"),
                     "post_title": caption[:50].replace("\n", " ") if caption else "Instagram Post",
                     "post_text": caption,
@@ -537,25 +590,34 @@ class SocialMediaSearchView(APIView):
                     "extra_details": {
                         "media_type": post.get("media_type"),
                         "media_url": post.get("media_url"),
+                        "likes": post.get("like_count", 0),
+                        "comments": post.get("comments_count", 0),
                     },
                 }
             )
-            current_idd += 1
+            current_id += 1
 
         # Fetch from Facebook
-        facebook_raw = self._fetch_facebook(keyword, hours=hours)
+        facebook_raw = self._fetch_facebook(keyword, hours=hours, user=user)
         for post in facebook_raw:
-            message = post.get("message", "") or post.get("story", "")
+            message = post.get("text") or post.get("message", "") or post.get("story", "")
+            
+            fb_location = post.get("location", "")
+            
             all_posts.append(
                 {
-                    "id": current_idd,
+                    "id": current_id,
                     "post_id": post.get("id"),
                     "post_title": message[:50].replace("\n", " ") if message else "Facebook Post",
                     "post_text": message,
-                    "post_url": post.get("permalink_url"),
+                    "post_url": post.get("permalink_url") or post.get("permalink"),
                     "platform": "facebook",
-                    "author": "Page",
-                    "published_at": post.get("created_time"),
+                    "author": post.get("author") or "Page",
+                    "published_at": post.get("created_time") or post.get("created_at"),
+                    "latitude": None,
+                    "longitude": None,
+                    "location_name": fb_location,
+                    "location_type": "city",
                     "extra_details": {
                         "type": post.get("type"),
                         "likes": post.get("likes", 0),
@@ -564,14 +626,14 @@ class SocialMediaSearchView(APIView):
                     },
                 }
             )
-            current_idd += 1
+            current_id += 1
 
         # Fetch from YouTube
         youtube_raw = self._fetch_youtube(keyword, hours=hours)
         for post in youtube_raw:
             all_posts.append(
                 {
-                    "id": current_idd,
+                    "id": current_id,
                     "post_id": post.get("id"),
                     "post_title": post.get("title"),
                     "post_text": post.get("description"),
@@ -586,73 +648,7 @@ class SocialMediaSearchView(APIView):
                     "extra_details": post.get("extra_details", {}),
                 }
             )
-            current_idd += 1
-
-        facebook_raw = self._fetch_facebook(keyword, user=user)
-        for post in facebook_raw:
-            text = post.get("text") or ""
-            # Use real location from Facebook 'place' field if available, else fall back to heuristic
-            fb_location = post.get("location", "")
-            fb_lat = None
-            fb_lng = None
-            fb_loc_name = fb_location if fb_location else ""
-            fb_loc_type = "city"
-            all_posts.append(
-                {
-                    "id": current_idd,
-                    "post_id": post.get("id"),
-                    "post_title": text[:50] + "..." if len(text) > 50 else text,
-                    "post_text": text,
-                    "post_url": post.get("permalink"),
-                    "platform": "twitter",
-                    "author": post.get("author", ""),
-                    "published_at": post.get("created_at"),
-                    "extra_details": {},
-                }
-            )
             current_id += 1
-
-        # Fetch from Instagram
-        instagram_raw = self._fetch_instagram(keyword, hours=hours)
-        print(f"DEBUG: Fetched {len(instagram_raw)} posts from Instagram")
-        for post in instagram_raw:
-            caption = post.get("caption", "")
-            all_posts.append(
-                {
-                    "id": current_id,
-                    "post_id": post.get("id"),
-                    "post_title": caption[:50].replace("\n", " ") if caption else "Instagram Post",
-                    "post_text": caption,
-                    "post_url": post.get("permalink"),
-                    "platform": "instagram",
-                    "author": post.get("username", ""), 
-                    "published_at": post.get("timestamp"),
-                    "extra_details": {
-                        "media_type": post.get("media_type"),
-                        "media_url": post.get("media_url"),
-                    },
-                }
-            )
-            current_idd += 1
-
-        # Fetch from YouTube
-        youtube_raw = self._fetch_youtube(keyword, hours=hours)
-        print(f"DEBUG: Fetched {len(youtube_raw)} posts from YouTube")
-        for post in youtube_raw:
-            all_posts.append(
-                {
-                    "id": current_id,
-                    "post_id": post.get("id"),
-                    "post_title": post.get("title"),
-                    "post_text": post.get("description"),
-                    "post_url": post.get("permalink"),
-                    "platform": "youtube",
-                    "author": post.get("author"),
-                    "published_at": post.get("published_at"),
-                    "extra_details": post.get("extra_details", {}),
-                }
-            )
-            current_idd += 1
         
         # Hours filter
         if hours:

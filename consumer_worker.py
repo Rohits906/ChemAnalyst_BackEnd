@@ -66,7 +66,7 @@ for msg in sentiment_consumer:
         post_text = data.get("post_text") or ""
         post_title = data.get("post_title") or (post_text[:100] if post_text else "")
         author_name = data.get("author") or ""
-        post_url = data.get("post_url") or "https://example.com"
+        post_url = data.get("post_url") or ""
         published_at_str = data.get("published_at")
         
         if published_at_str:
@@ -76,6 +76,11 @@ for msg in sentiment_consumer:
                 published_at = timezone.now()
         else:
             published_at = timezone.now()
+
+        extra_details = data.get("extra_details") or {}
+        likes = extra_details.get("likes", 0)
+        comments = extra_details.get("comments", 0)
+        shares = extra_details.get("shares", 0)
 
         post_obj, created = Post.objects.get_or_create(
             platform=platform,
@@ -90,7 +95,10 @@ for msg in sentiment_consumer:
                 "longitude": data.get("longitude"),
                 "location_name": data.get("location_name") or "",
                 "location_type": data.get("location_type") or "",
-                "raw_json": data.get("extra_details") or {}
+                "likes": likes,
+                "comments": comments,
+                "shares": shares,
+                "raw_json": extra_details
             }
         )
 
@@ -110,6 +118,18 @@ for msg in sentiment_consumer:
             if (not post_obj.location_name or post_obj.location_name in ("", "Global")) and real_loc:
                 post_obj.location_name = real_loc
                 updated = True
+            
+            # Update engagement metrics if they have increased
+            if likes > post_obj.likes:
+                post_obj.likes = likes
+                updated = True
+            if comments > post_obj.comments:
+                post_obj.comments = comments
+                updated = True
+            if shares > post_obj.shares:
+                post_obj.shares = shares
+                updated = True
+
             if updated:
                 post_obj.save()
 

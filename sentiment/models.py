@@ -56,7 +56,7 @@ class Post(models.Model):
     author_id = models.CharField(max_length=255, default="N/A")
     post_title = models.CharField(max_length=255, default="")
     post_text = models.TextField()
-    post_url = models.URLField(max_length=500, default="https://example.com")
+    post_url = models.URLField(max_length=500, null=True, blank=True)
     published_at = models.DateTimeField()
     likes = models.IntegerField(default=0)
     comments = models.IntegerField(default=0)
