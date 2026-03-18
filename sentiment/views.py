@@ -617,69 +617,42 @@ class SocialMediaSearchView(APIView):
         print(f"DEBUG: Fetched {len(instagram_raw)} posts from Instagram")
         for post in instagram_raw:
             caption = post.get("caption", "")
-            all_posts.append({
-                "id": current_id,
-                "post_id": post.get("id"),
-                "post_title": caption[:50].replace("\n", " ") if caption else "Instagram Post",
-                "post_text": caption,
-                "post_url": post.get("permalink"),
-                "platform": "instagram",
-                "author": post.get("username", "N/A"),
-                "published_at": post.get("timestamp"),
-                "latitude": None,
-                "longitude": None,
-                "location_name": "",
-                "location_type": "city",
-                "extra_details": {
-                    "media_type": post.get("media_type"),
-                    "media_url": post.get("media_url"),
-                },
-            })
-            current_id += 1
+            all_posts.append(
+                {
+                    "id": current_id,
+                    "post_id": post.get("id"),
+                    "post_title": caption[:50].replace("\n", " ") if caption else "Instagram Post",
+                    "post_text": caption,
+                    "post_url": post.get("permalink"),
+                    "platform": "instagram",
+                    "author": post.get("username", ""), 
+                    "published_at": post.get("timestamp"),
+                    "extra_details": {
+                        "media_type": post.get("media_type"),
+                        "media_url": post.get("media_url"),
+                    },
+                }
+            )
+            current_idd += 1
 
         # Fetch from YouTube
         youtube_raw = self._fetch_youtube(keyword, hours=hours)
         print(f"DEBUG: Fetched {len(youtube_raw)} posts from YouTube")
         for post in youtube_raw:
-            all_posts.append({
-                "id": current_id,
-                "post_id": post.get("id"),
-                "post_title": post.get("title"),
-                "post_text": post.get("description"),
-                "post_url": post.get("permalink"),
-                "platform": "youtube",
-                "author": post.get("author"),
-                "published_at": post.get("published_at"),
-                "latitude": None,
-                "longitude": None,
-                "location_name": "",
-                "location_type": "city",
-                "extra_details": post.get("extra_details", {}),
-            })
-            current_id += 1
-
-        # Fetch from Facebook
-        facebook_raw = self._fetch_facebook(keyword, hours=hours, user=user)
-        print(f"DEBUG: Fetched {len(facebook_raw)} posts from Facebook")
-        for post in facebook_raw:
-            text = post.get("text") or ""
-            fb_location = post.get("location", "")
-            all_posts.append({
-                "id": current_id,
-                "post_id": post.get("id"),
-                "post_title": text[:50] + "..." if len(text) > 50 else text,
-                "post_text": text,
-                "post_url": post.get("permalink"),
-                "platform": "facebook",
-                "author": post.get("author"),
-                "published_at": post.get("created_at"),
-                "latitude": None,
-                "longitude": None,
-                "location_name": fb_location,
-                "location_type": "city",
-                "extra_details": {},
-            })
-            current_id += 1
+            all_posts.append(
+                {
+                    "id": current_id,
+                    "post_id": post.get("id"),
+                    "post_title": post.get("title"),
+                    "post_text": post.get("description"),
+                    "post_url": post.get("permalink"),
+                    "platform": "youtube",
+                    "author": post.get("author"),
+                    "published_at": post.get("published_at"),
+                    "extra_details": post.get("extra_details", {}),
+                }
+            )
+            current_idd += 1
         
         # Hours filter
         if hours:
