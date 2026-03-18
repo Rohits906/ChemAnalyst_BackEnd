@@ -10,6 +10,10 @@ from sentiment.models import Post, Sentiment
 from django.db.models import Count, Q
 from datetime import datetime, timedelta
 
+
+from rest_framework.response import Response
+from sentiment.models import Post, Sentiment, User_Keyword
+
 @api_view(["GET"])
 def platform_data_status(request):
     try:
@@ -23,14 +27,18 @@ def platform_data_status(request):
         if to_date:
             date_q &= Q(published_at__lte=to_date)
 
+        # Get user's keywords for filtering sentiment posts
+        user_keywords = User_Keyword.objects.filter(user=request.user).values_list("keyword", flat=True)
+
         platforms_to_check = ["twitter", "facebook", "instagram", "linkedin", "youtube"]
         response_data = {}
 
         for p_name in platforms_to_check:
-            # Check ChannelPost
-            cp_count = ChannelPost.objects.filter(date_q, platform__name=p_name).count()
-            # Check Sentiment Post
-            sp_count = Post.objects.filter(date_q, platform=p_name).count()
+            # Check ChannelPost (filtered by user)
+            cp_count = ChannelPost.objects.filter(date_q, platform__name=p_name, platform__user=request.user).count()
+            
+            # Check Sentiment Post (filtered by user's keywords)
+            sp_count = Post.objects.filter(date_q, platform=p_name, sentiments__keyword__in=user_keywords).distinct().count()
             
             total_count = cp_count + sp_count
             response_data[p_name] = {
@@ -38,10 +46,10 @@ def platform_data_status(request):
                 "count": total_count,
             }
 
-        return JsonResponse(response_data)
+        return Response(response_data)
 
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
+        return Response({"error": str(e)}, status=500)
 
 @api_view(["GET"])
 def export_report(request, platform, file_type):
@@ -58,8 +66,8 @@ def export_report(request, platform, file_type):
 
         report_data = []
         
-        # 1. Fetch from ChannelPost
-        cp_posts = ChannelPost.objects.filter(date_q, platform__name=platform).select_related('platform')
+        # 1. Fetch from ChannelPost (filtered by user)
+        cp_posts = ChannelPost.objects.filter(date_q, platform__name=platform, platform__user=request.user).select_related('platform')
         for post in cp_posts:
             report_data.append({
                 "Sr": len(report_data) + 1,
@@ -73,11 +81,13 @@ def export_report(request, platform, file_type):
                 "Published_At": post.published_at.strftime("%Y-%m-%d %H:%M:%S")
             })
 
-        # 2. Fetch from Sentiment Post
-        sp_posts = Post.objects.filter(date_q, platform=platform).prefetch_related('sentiments')
+        # 2. Fetch from Sentiment Post (filtered by user's keywords)
+        user_keywords = User_Keyword.objects.filter(user=request.user).values_list("keyword", flat=True)
+        sp_posts = Post.objects.filter(date_q, platform=platform, sentiments__keyword__in=user_keywords).prefetch_related('sentiments').distinct()
+        
         for post in sp_posts:
-            # Get the first sentiment label if available
-            sentiment_obj = post.sentiments.first()
+            # Get user's specific sentiment record for this post
+            sentiment_obj = post.sentiments.filter(keyword__in=user_keywords).first()
             sentiment_label = sentiment_obj.sentiment_label if sentiment_obj else "Neutral"
             
             report_data.append({

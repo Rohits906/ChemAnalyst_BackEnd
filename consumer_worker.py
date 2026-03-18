@@ -57,7 +57,8 @@ print(f"Started the consumer on topic: {settings.KAFKA_SENTIMENT_TOPIC}")
 
 for msg in sentiment_consumer:
     data = msg.value
-    print(f"Processing post: {data.get('post_id')}")
+    keyword = data.get('keyword', 'N/A')
+    print(f"Processing post: {data.get('post_id')} for keyword: {keyword}")
 
     try:
         platform_post_id = data.get("post_id") or f"unknown_{uuid.uuid4()}"
@@ -85,19 +86,38 @@ for msg in sentiment_consumer:
                 "post_text": post_text,
                 "post_url": post_url,
                 "published_at": published_at,
+                "latitude": data.get("latitude"),
+                "longitude": data.get("longitude"),
+                "location_name": data.get("location_name") or "",
+                "location_type": data.get("location_type") or "",
                 "raw_json": data.get("extra_details") or {}
             }
         )
 
-        if not created and (not post_obj.post_title or post_obj.post_title == "N/A"):
-            post_obj.post_title = post_title
-            post_obj.save()
+        if not created:
+            updated = False
+            if not post_obj.post_title or post_obj.post_title == "N/A":
+                post_obj.post_title = post_title
+                updated = True
+            # Only update location if real data is available from API
+            if post_obj.latitude is None and data.get("latitude") is not None:
+                post_obj.latitude = data.get("latitude")
+                updated = True
+            if post_obj.longitude is None and data.get("longitude") is not None:
+                post_obj.longitude = data.get("longitude")
+                updated = True
+            real_loc = data.get("location_name")
+            if (not post_obj.location_name or post_obj.location_name in ("", "Global")) and real_loc:
+                post_obj.location_name = real_loc
+                updated = True
+            if updated:
+                post_obj.save()
 
         analysis = analyze_sentiment(post_text)
 
         Sentiment.objects.update_or_create(
             post=post_obj,
-            keyword=data.get("keyword") or "N/A",
+            keyword=(data.get("keyword") or "N/A").strip(),
             defaults={
                 "sentiment_label": analysis["sentiment"],
                 "confidence_score": analysis["confidence_score"],

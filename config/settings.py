@@ -89,8 +89,14 @@ USE_I18N = True
 
 USE_TZ = True
 
+
+# Static files (CSS, JavaScript, Images)
 STATIC_URL = "static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
+
+# Media files (Uploaded by users)
+MEDIA_URL = "/media/"
+MEDIA_ROOT = BASE_DIR / "media"
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
@@ -109,6 +115,8 @@ INSTAGRAM_ACCESS_TOKEN = config("INSTAGRAM_ACCESS_TOKEN", default="")
 INSTAGRAM_BUSINESS_ACCOUNT_ID = config("INSTAGRAM_BUSINESS_ACCOUNT_ID", default="")
 YOUTUBE_API_KEY = config("YOUTUBE_API_KEY", default="")
 TWITTER_BEARER_TOKEN = config("TWITTER_BEARER_TOKEN", default="")
+FACEBOOK_PAGE_ACCESS_TOKEN = config("FACEBOOK_PAGE_ACCESS_TOKEN", default="")
+FACEBOOK_PAGE_ID = config("FACEBOOK_PAGE_ID", default="")
 
 # frontend url used by OAuth callbacks
 FRONTEND_URL = config("FRONTEND_URL", default="http://localhost:3000")
@@ -120,8 +128,17 @@ INSTAGRAM_CLIENT_ID = config("INSTAGRAM_CLIENT_ID", default="")
 INSTAGRAM_CLIENT_SECRET = config("INSTAGRAM_CLIENT_SECRET", default="")
 TWITTER_API_KEY = config("TWITTER_API_KEY", default="")
 TWITTER_API_SECRET = config("TWITTER_API_SECRET", default="")
+
+GOOGLE_CLIENT_ID = config("GOOGLE_CLIENT_ID", default="")
+GOOGLE_CLIENT_SECRET = config("GOOGLE_CLIENT_SECRET", default="")
+GOOGLE_REDIRECT_URI = config("GOOGLE_REDIRECT_URI", default="")
+
 LINKEDIN_CLIENT_ID = config("LINKEDIN_CLIENT_ID", default="")
 LINKEDIN_CLIENT_SECRET = config("LINKEDIN_CLIENT_SECRET", default="")
+LINKEDIN_REDIRECT_URI = config("LINKEDIN_REDIRECT_URI", default="")
+
+FACEBOOK_LOGIN_REDIRECT_URI = config("FACEBOOK_LOGIN_REDIRECT_URI", default="")
+
 FACEBOOK_API_VERSION = config('FACEBOOK_API_VERSION', 'v25.0')
 FACEBOOK_REDIRECT_URI = config('FACEBOOK_REDIRECT_URI', 'http://localhost:3000/api/platform/oauth/callback/')
 

@@ -5,15 +5,20 @@ from .views import (
     Enable2FAView, Verify2FAView, Disable2FAView, LoginVerify2FAView, 
     SecurityQuestionListView, SetupSecurityQuestionsView, Check2FAStatusView,
     AccountMemberListView, AccountRoleListView, UpdateMemberRoleView, RemoveMemberView,
-    InviteMemberView, AcceptInvitationView, InvitationDetailView, ProcessInvitationView
+    InviteMemberView, AcceptInvitationView, InvitationDetailView, ProcessInvitationView,
+    AvatarUploadView, ForgotPasswordView, ResetPasswordView, SocialAuthView
 )
 
 urlpatterns = [
     path("signup/", SignupView.as_view(), name="signup"),
     path("login/", LoginView.as_view(), name="login"),
+    path("social-auth/", SocialAuthView.as_view(), name="social-auth"),
     path("logout/", LogoutView.as_view(), name="logout"),
+    path("forgot-password/", ForgotPasswordView.as_view(), name="forgot-password"),
+    path("reset-password/", ResetPasswordView.as_view(), name="reset-password"),
     path("verify/", VerifyAuth.as_view(), name="verifyauth"),
     path("profile/", ProfileView.as_view(), name="profile"),
+    path("avatar-upload/", AvatarUploadView.as_view(), name="avatar-upload"),
     path("change-password/", ChangePasswordView.as_view(), name="change-password"),
     path("delete/", DeleteAccountView.as_view(), name="delete-account"),
     path("deactivate/", DeactivateAccountView.as_view(), name="deactivate-account"),

@@ -1,5 +1,0 @@
---- POST COUNTS ---
-youtube: 230
-
---- SENTIMENT COUNTS ---
-youtube: 265
