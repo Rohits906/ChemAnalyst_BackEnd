@@ -943,17 +943,13 @@ class SocialAuthView(APIView):
             first_name = user_info.get('given_name') or user_info.get('first_name') or user_info.get('name', '').split(' ')[0]
             last_name = user_info.get('family_name') or user_info.get('last_name') or (' '.join(user_info.get('name', '').split(' ')[1:]) if ' ' in user_info.get('name', '') else '')
             
-            user, created = User.objects.get_or_create(email=email, defaults={
-                'username': email,
-                'first_name': first_name,
-                'last_name': last_name,
-            })
-
-            if created:
-                user.set_unusable_password()
-                user.save()
-                # Create Account for the user
-                Account.objects.get_or_create(account_owner=user, defaults={'name': f"{first_name} {last_name}"})
+            try:
+                user = User.objects.get(email=email)
+            except User.DoesNotExist:
+                return Response({
+                    "success": False,
+                    "message": "No account found with this email. Please register first."
+                }, status=status.HTTP_404_NOT_FOUND)
 
             # Generate tokens
             refresh = RefreshToken.for_user(user)
