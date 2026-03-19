@@ -11,7 +11,7 @@ from rest_framework.response import Response
 from datetime import datetime, timedelta
 from .models import SentimentPost, User_Keyword, Sentiment
 from .serializers import UserKeywordSerializer, UserSentimentSerializer
-from .producers import add_to_sentiment_quene
+from .producers import add_to_sentiment_queue
 from platforms.models import UserSocialAccount
 
 # Setup logging
@@ -540,7 +540,7 @@ class SocialMediaSearchView(APIView):
         keyword = keyword.strip()
         search_logger.info(f"Starting search for keyword: '{keyword}', hours: {hours}")
         all_posts = []
-        current_id = 1
+        current_idd = 1
         
         twitter_raw = self._fetch_twitter(keyword, hours=hours)
         print(f"DEBUG: Fetched {len(twitter_raw)} posts from Twitter")
@@ -548,7 +548,7 @@ class SocialMediaSearchView(APIView):
             text = post.get("text", "")
             all_posts.append(
                 {
-                    "id": current_id,
+                    "id": current_idd,
                     "post_id": post.get("id"),
                     "post_title": text[:50] + "..." if len(text) > 50 else text,
                     "post_text": text,
@@ -661,9 +661,21 @@ class SocialMediaSearchView(APIView):
                     if pub_at:
                         try:
                             if isinstance(pub_at, str):
-                                dt = datetime.fromisoformat(pub_at.replace("Z", "+00:00"))
+                                # Replace 'Z' with +00:00 for fromisoformat
+                                clean_pub_at = pub_at.replace("Z", "+00:00")
+                                # Some formats might have space or extra chars
+                                if "T" not in clean_pub_at and " " in clean_pub_at:
+                                    dt = datetime.strptime(clean_pub_at, "%Y-%m-%d %H:%M:%S%z")
+                                else:
+                                    dt = datetime.fromisoformat(clean_pub_at)
                             else:
                                 dt = pub_at
+                            
+                            # Ensure dt is aware
+                            if dt.tzinfo is None:
+                                from django.utils.timezone import make_aware
+                                dt = make_aware(dt)
+                                
                             if dt >= time_threshold:
                                 filtered_posts.append(p)
                         except (ValueError, TypeError):
@@ -674,7 +686,7 @@ class SocialMediaSearchView(APIView):
             except ValueError:
                 pass
 
-        add_to_sentiment_quene(all_posts, keyword=keyword)
+        add_to_sentiment_queue(all_posts, keyword=keyword)
         
         # Platform counts
         yt_count = len([p for p in all_posts if p['platform'] == 'youtube'])

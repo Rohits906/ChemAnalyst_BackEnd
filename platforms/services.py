@@ -1,4 +1,5 @@
 import logging
+import requests
 from django.utils import timezone
 from .models import ChannelStats, ChannelPost
 from .platform_services import PlatformServiceFactory
@@ -20,12 +21,31 @@ def fetch_platform_data(platform):
             return bool(result), "YouTube data fetched successfully"
         
         # For Facebook and Instagram, use the comprehensive meta_services
-        if platform.name == "facebook":
-            service = FacebookService(platform)
-            return _fetch_meta_data(platform, service, "Facebook")
-        elif platform.name == "instagram":
-            service = InstagramService(platform)
-            return _fetch_meta_data(platform, service, "Instagram")
+        if platform.name in ["facebook", "instagram"]:
+            from .models import UserSocialAccount
+            
+            # Get the user's connected account for the freshest token available
+            social_account = UserSocialAccount.objects.filter(
+                user=platform.user,
+                platform=platform.name,
+                is_token_valid=True
+            ).order_by('-last_synced').first() # Get most recently used/synced one
+
+            if social_account:
+                # Update platform metadata with token for consistency
+                if not platform.metadata:
+                    platform.metadata = {}
+                
+                token_key = 'page_access_token' if platform.name == 'facebook' else 'access_token'
+                platform.metadata[token_key] = social_account.access_token
+                platform.save(update_fields=['metadata'])
+            
+            if platform.name == "facebook":
+                service = FacebookService(platform)
+                return _fetch_meta_data(platform, service, "Facebook")
+            else:
+                service = InstagramService(platform)
+                return _fetch_meta_data(platform, service, "Instagram")
         
         # Use PlatformServiceFactory for other platforms (Twitter, LinkedIn)
         service = PlatformServiceFactory.get_service(platform)
@@ -109,6 +129,15 @@ def fetch_platform_data(platform):
         return False, f"Data fetch failed: {str(e)}"
 
 
+def _is_token_error(exc):
+    """Check if a requests exception is a Meta OAuth token error (code 190)."""
+    try:
+        err = exc.response.json().get("error", {})
+        return err.get("code") == 190
+    except Exception:
+        return False
+
+
 def _fetch_meta_data(platform, service, platform_type):
     """
     Fetch data from Meta services (Facebook/Instagram) using the comprehensive meta_services.
@@ -184,7 +213,7 @@ def _fetch_meta_data(platform, service, platform_type):
                         "shares": post_data.get("shares", 0),
                         "views": post_data.get("views", post_data.get("impressions", 0)),
                         "published_at": published_at,
-                        "metadata": post_data.get("metadata", {})
+                        "raw_data": post_data.get("metadata", {})
                     }
                 )
                 
@@ -212,6 +241,26 @@ def _fetch_meta_data(platform, service, platform_type):
         logger.info(f"Successfully fetched {platform_type} data: {len(posts_data)} posts, {channel_info.get('followers', 0)} followers")
         return True, f"{platform_type} data fetched successfully"
         
+    except requests.exceptions.RequestException as e:
+        if _is_token_error(e):
+            # The OAuth token is no longer valid – mark the social account as invalid
+            # so the user is prompted to reconnect in the UI.
+            try:
+                from .models import UserSocialAccount
+                UserSocialAccount.objects.filter(
+                    user=platform.user,
+                    platform=platform.name,
+                    is_token_valid=True
+                ).update(is_token_valid=False)
+                logger.warning(
+                    f"{platform_type} token invalidated for platform {platform.channel_id}. "
+                    "Marked social account as invalid."
+                )
+            except Exception as mark_err:
+                logger.error(f"Failed to mark social account as invalid: {mark_err}")
+            return False, f"{platform_type} access token has expired or been revoked. Please reconnect your {platform_type} account."
+        logger.error(f"Error fetching {platform_type} data for {platform.channel_id}: {str(e)}", exc_info=True)
+        return False, f"Data fetch failed: {str(e)}"
     except Exception as e:
         logger.error(f"Error fetching {platform_type} data for {platform.channel_id}: {str(e)}", exc_info=True)
         return False, f"Data fetch failed: {str(e)}"

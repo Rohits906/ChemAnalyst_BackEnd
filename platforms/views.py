@@ -1133,6 +1133,8 @@ class PlatformRefreshView(APIView):
     permission_classes = [IsAuthenticated]
     
     def post(self, request, platform_id=None):
+        from .tasks import sync_platform_task
+        
         if platform_id:
             # Refresh specific platform
             platform = get_object_or_404(
@@ -1142,23 +1144,36 @@ class PlatformRefreshView(APIView):
                 is_active=True
             )
             
-            queue_platform_fetch(platform.id, "update")
+            # Use .apply() for synchronous execution of the task logic
+            result = sync_platform_task.apply(args=[str(platform.id)])
             return Response({
-                "message": f"Refresh triggered for {platform.name}"
+                "message": f"Refresh completed for {platform.name}",
+                "result": str(result.result)
             })
         else:
-            # Refresh all platforms
+            # Refresh all platforms async in backend
             platforms = Platform.objects.filter(
                 user=request.user,
                 is_active=True
             )
             
-            platform_ids = list(platforms.values_list('id', flat=True))
-            queue_batch_platform_fetch(platform_ids, "update")
+            results = []
+            errors = []
+            for p in platforms:
+                res = sync_platform_task.apply(args=[str(p.id)])
+                task_result = res.result
+                if isinstance(task_result, dict):
+                    success = task_result.get("success", False)
+                    msg = task_result.get("message", "")
+                    if not success:
+                        errors.append({"platform": p.name, "error": msg})
+                    else:
+                        results.append(p.name)
             
-            return Response({
-                "message": f"Refresh triggered for {len(platform_ids)} platforms"
-            })
+            resp = {"message": f"Refresh completed for {len(results)} platforms"}
+            if errors:
+                resp["errors"] = errors
+            return Response(resp)
 
 
 # Channel Page Views

@@ -11,7 +11,7 @@ except Exception as e:
     print(f"Could not connect to Kafka: {e}")
     sentiment_producer = None
 
-def add_to_sentiment_quene(data, keyword="N/A"):
+def add_to_sentiment_queue(data, keyword="N/A"):
     if not sentiment_producer:
         print("Kafka producer is not initialized.")
         return
