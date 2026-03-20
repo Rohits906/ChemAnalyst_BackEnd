@@ -39,6 +39,7 @@ def fetch_youtube_channel_data(platform_obj):
         
         # Try different lookup methods
         lookup_methods = [
+            ("forHandle", {"part": "statistics,snippet", "forHandle": f"@{channel_id}"}),
             ("forUsername", {"part": "statistics,snippet", "forUsername": channel_id}),
             ("direct ID", {"part": "statistics,snippet", "id": channel_id}),
         ]
@@ -137,7 +138,7 @@ def fetch_youtube_channel_data(platform_obj):
                 part="snippet",
                 channelId=actual_channel_id,
                 order="date",
-                maxResults=15,
+                maxResults=50,
                 type="video",
             ).execute()
             
@@ -170,20 +171,22 @@ def fetch_youtube_channel_data(platform_obj):
                         except:
                             published_at = timezone.now()
                         
-                        # Create post
-                        post = ChannelPost.objects.create(
+                        # Create or update post
+                        post, created = ChannelPost.objects.update_or_create(
                             platform=platform_obj,
                             platform_post_id=video_id,
-                            title=snippet.get("title", ""),
-                            content=snippet.get("description", ""),
-                            post_url=f"https://youtube.com/watch?v={video_id}",
-                            media_type="video",
-                            likes=int(video_stats.get("likeCount", 0)),
-                            comments=int(video_stats.get("commentCount", 0)),
-                            views=int(video_stats.get("viewCount", 0)),
-                            shares=0,
-                            published_at=published_at,
-                            collected_at=timezone.now(),
+                            defaults={
+                                "title": snippet.get("title", ""),
+                                "content": snippet.get("description", ""),
+                                "post_url": f"https://youtube.com/watch?v={video_id}",
+                                "media_type": "video",
+                                "likes": int(video_stats.get("likeCount", 0)),
+                                "comments": int(video_stats.get("commentCount", 0)),
+                                "views": int(video_stats.get("viewCount", 0)),
+                                "shares": 0,
+                                "published_at": published_at,
+                                "collected_at": timezone.now(),
+                            }
                         )
                         videos_created += 1
                     except Exception as e:

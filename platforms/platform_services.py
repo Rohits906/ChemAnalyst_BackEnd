@@ -123,102 +123,204 @@ class YouTubeService(BasePlatformService):
 class TwitterService(BasePlatformService):
     def __init__(self, platform):
         super().__init__(platform)
-        self.bearer_token = settings.TWITTER_BEARER_TOKEN
-        self.base_url = "https://api.twitter.com/2"
+        # Use API v2 endpoint (api.x.com)
+        self.base_url = "https://api.x.com/2"
+        
+        # Get token from platform metadata or fallback to settings
+        metadata = platform.metadata or {}
+        oauth_type = metadata.get('oauth_type')
+        
+        print(f"DEBUG TwitterService - Platform: {platform.channel_id}, oauth_type: {oauth_type}, has_access_token: {bool(metadata.get('access_token'))}, has_bearer_token: {bool(metadata.get('bearer_token'))}")
+        
+        if oauth_type == 'oauth2':
+            # OAuth 2.0 token from user OAuth flow
+            self.access_token = metadata.get('access_token')
+            self.bearer_token = None
+            print(f"DEBUG TwitterService - Using OAuth2 token for user {platform.channel_id}")
+        elif metadata.get('system_auth'):
+            # System auth with Bearer token
+            self.bearer_token = metadata.get('bearer_token', settings.TWITTER_BEARER_TOKEN)
+            self.access_token = None
+            print(f"DEBUG TwitterService - Using system Bearer token")
+        else:
+            # Fallback to settings
+            self.bearer_token = settings.TWITTER_BEARER_TOKEN
+            self.access_token = None
+            print(f"DEBUG TwitterService - Using settings Bearer token")
         
     def _get_headers(self):
-        return {"Authorization": f"Bearer {self.bearer_token}"}
+        # Use OAuth access token if available, otherwise use Bearer token
+        if self.access_token:
+            return {"Authorization": f"Bearer {self.access_token}"}
+        elif self.bearer_token:
+            return {"Authorization": f"Bearer {self.bearer_token}"}
+        else:
+            raise Exception("No Twitter authentication token available")
         
     def fetch_channel_info(self):
-        # Twitter API v2 for user lookup
+        # Twitter API v2 for user lookup using username
         username = self.platform.channel_id.lstrip("@")
+        
+        # Try by username first (works with both user ID and username)
         url = f"{self.base_url}/users/by/username/{username}"
         params = {
             "user.fields": "public_metrics,description,profile_image_url,created_at"
         }
         
-        response = requests.get(url, headers=self._get_headers(), params=params)
-        if response.status_code != 200:
-            # raise exception so caller can log detailed error
-            raise Exception(f"Twitter user lookup failed ({response.status_code}): {response.text}")
-        
-        data = response.json()
-        
-        if not data.get("data"):
-            raise Exception(f"Twitter returned no user data for '{username}'")
+        try:
+            response = requests.get(url, headers=self._get_headers(), params=params)
+            if response.status_code == 404:
+                # Try by ID if username not found
+                url = f"{self.base_url}/users/{username}"
+                response = requests.get(url, headers=self._get_headers(), params=params)
             
-        user = data["data"]
-        metrics = user.get("public_metrics", {})
-        
-        return {
-            "channel_name": user.get("name", username),
-            "profile_picture": user.get("profile_image_url", ""),
-            "followers": metrics.get("followers_count", 0),
-            "following": metrics.get("following_count", 0),
-            "posts_count": metrics.get("tweet_count", 0),
-            "created_at": user.get("created_at"),
-        }
+            if response.status_code != 200:
+                raise Exception(f"Twitter user lookup failed ({response.status_code}): {response.text}")
+            
+            data = response.json()
+            
+            if not data.get("data"):
+                raise Exception(f"Twitter returned no user data for '{username}'")
+                
+            user = data["data"]
+            metrics = user.get("public_metrics", {})
+            
+            return {
+                "channel_name": user.get("name", username),
+                "username": user.get("username", username),
+                "profile_picture": user.get("profile_image_url", ""),
+                "followers": metrics.get("followers_count", 0),
+                "following": metrics.get("following_count", 0),
+                "posts_count": metrics.get("tweet_count", 0),
+                "created_at": user.get("created_at"),
+                "description": user.get("description", ""),
+            }
+        except Exception as e:
+            logger = __import__('logging').getLogger(__name__)
+            logger.error(f"Twitter fetch_channel_info error: {e}")
+            raise
         
     def fetch_posts(self, limit=50):
         # First get user ID (strip @ if present)
         username = self.platform.channel_id.lstrip("@")
+        
+        # Get user ID first
         user_url = f"{self.base_url}/users/by/username/{username}"
-        user_response = requests.get(user_url, headers=self._get_headers())
-        if user_response.status_code != 200:
-            logger = __import__('logging').getLogger(__name__)
-            logger.warning(f"Twitter user ID lookup failed ({user_response.status_code}): {user_response.text}")
-            return []
-        user_data = user_response.json()
         
-        if not user_data.get("data"):
-            return []
+        try:
+            user_response = requests.get(user_url, headers=self._get_headers())
+            if user_response.status_code == 404:
+                # Try as ID directly
+                user_url = f"{self.base_url}/users/{username}"
+                user_response = requests.get(user_url, headers=self._get_headers())
             
-        user_id = user_data["data"]["id"]
+            if user_response.status_code != 200:
+                logger = __import__('logging').getLogger(__name__)
+                logger.warning(f"Twitter user ID lookup failed ({user_response.status_code}): {user_response.text}")
+                return []
+            
+            user_data = user_response.json()
+            
+            if not user_data.get("data"):
+                return []
+                
+            user_id = user_data["data"]["id"]
+            
+            # Fetch tweets
+            tweets_url = f"{self.base_url}/users/{user_id}/tweets"
+            params = {
+                "max_results": min(limit, 100),
+                "tweet.fields": "created_at,public_metrics,attachments",
+                "media.fields": "url,preview_image_url",
+                "expansions": "attachments.media_keys",
+            }
+            
+            response = requests.get(tweets_url, headers=self._get_headers(), params=params)
+            if response.status_code != 200:
+                raise Exception(f"Twitter tweets fetch failed ({response.status_code}): {response.text}")
+            
+            data = response.json()
+            
+            posts = []
+            media_map = {}
+            
+            if data.get("includes") and data["includes"].get("media"):
+                for media in data["includes"]["media"]:
+                    media_map[media["media_key"]] = media.get("url", "")
+            
+            for tweet in data.get("data", []):
+                metrics = tweet.get("public_metrics", {})
+                media_urls = []
+                
+                if tweet.get("attachments") and tweet["attachments"].get("media_keys"):
+                    for key in tweet["attachments"]["media_keys"]:
+                        if key in media_map:
+                            media_urls.append(media_map[key])
+                
+                posts.append({
+                    "platform_post_id": tweet["id"],
+                    "title": tweet["text"][:100] + ("..." if len(tweet["text"]) > 100 else ""),
+                    "content": tweet["text"],
+                    "post_url": f"https://twitter.com/{self.platform.channel_id}/status/{tweet['id']}",
+                    "media_urls": media_urls,
+                    "media_type": "image" if media_urls else "text",
+                    "likes": metrics.get("like_count", 0),
+                    "comments": metrics.get("reply_count", 0),
+                    "shares": metrics.get("retweet_count", 0),
+                    "published_at": tweet["created_at"],
+                })
+                
+            return posts
+        except Exception as e:
+            logger = __import__('logging').getLogger(__name__)
+            logger.error(f"Twitter fetch_posts error: {e}")
+            return []
+    
+    def fetch_followers(self, user_id=None, max_results=100):
+        """Fetch user followers"""
+        if not user_id:
+            username = self.platform.channel_id.lstrip("@")
+            user_url = f"{self.base_url}/users/by/username/{username}"
+            user_response = requests.get(user_url, headers=self._get_headers())
+            if user_response.status_code != 200:
+                return []
+            user_id = user_response.json().get("data", {}).get("id")
         
-        # Fetch tweets
-        tweets_url = f"{self.base_url}/users/{user_id}/tweets"
+        url = f"{self.base_url}/users/{user_id}/followers"
         params = {
-            "max_results": min(limit, 100),
-            "tweet.fields": "created_at,public_metrics,attachments",
-            "media.fields": "url",
-            "expansions": "attachments.media_keys",
+            "max_results": min(max_results, 1000),
+            "user.fields": "public_metrics,profile_image_url,description",
         }
         
-        response = requests.get(tweets_url, headers=self._get_headers(), params=params)
+        response = requests.get(url, headers=self._get_headers(), params=params)
         if response.status_code != 200:
-            raise Exception(f"Twitter tweets fetch failed ({response.status_code}): {response.text}")
+            return []
+        
         data = response.json()
+        return data.get("data", [])
+    
+    def fetch_following(self, user_id=None, max_results=100):
+        """Fetch users that this user follows"""
+        if not user_id:
+            username = self.platform.channel_id.lstrip("@")
+            user_url = f"{self.base_url}/users/by/username/{username}"
+            user_response = requests.get(user_url, headers=self._get_headers())
+            if user_response.status_code != 200:
+                return []
+            user_id = user_response.json().get("data", {}).get("id")
         
-        posts = []
-        media_map = {}
+        url = f"{self.base_url}/users/{user_id}/following"
+        params = {
+            "max_results": min(max_results, 1000),
+            "user.fields": "public_metrics,profile_image_url,description",
+        }
         
-        if data.get("includes") and data["includes"].get("media"):
-            for media in data["includes"]["media"]:
-                media_map[media["media_key"]] = media.get("url", "")
+        response = requests.get(url, headers=self._get_headers(), params=params)
+        if response.status_code != 200:
+            return []
         
-        for tweet in data.get("data", []):
-            metrics = tweet.get("public_metrics", {})
-            media_urls = []
-            
-            if tweet.get("attachments") and tweet["attachments"].get("media_keys"):
-                for key in tweet["attachments"]["media_keys"]:
-                    if key in media_map:
-                        media_urls.append(media_map[key])
-            
-            posts.append({
-                "platform_post_id": tweet["id"],
-                "title": tweet["text"][:100] + ("..." if len(tweet["text"]) > 100 else ""),
-                "content": tweet["text"],
-                "post_url": f"https://twitter.com/{self.platform.channel_id}/status/{tweet['id']}",
-                "media_urls": media_urls,
-                "media_type": "image" if media_urls else "text",
-                "likes": metrics.get("like_count", 0),
-                "comments": metrics.get("reply_count", 0),
-                "shares": metrics.get("retweet_count", 0),
-                "published_at": tweet["created_at"],
-            })
-            
-        return posts
+        data = response.json()
+        return data.get("data", [])
 
 
 class InstagramService(BasePlatformService):
@@ -320,7 +422,7 @@ class FacebookService(BasePlatformService):
     def __init__(self, platform):
         super().__init__(platform)
         self.page_token = settings.FACEBOOK_PAGE_ACCESS_TOKEN
-        self.base_url = "https://graph.facebook.com/v22.0"
+        self.base_url = "https://graph.facebook.com/v25.0"
         
     def fetch_channel_info(self):
         """Fetch Facebook page information"""
@@ -343,7 +445,7 @@ class FacebookService(BasePlatformService):
                 "channel_name": page_data.get("name", ""),
                 "profile_picture": page_data.get("picture", {}).get("data", {}).get("url", ""),
                 "followers": page_data.get("followers_count", 0) or page_data.get("fan_count", 0),
-                "posts_count": 0,  # Would require additional endpoint
+                "posts_count": len(self._make_request(f"{self.page_id}/posts", params={'limit': 100}).get('data', [])) if self.page_id else 0,  # Would require additional endpoint
             }
         except Exception as e:
             import logging

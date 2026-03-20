@@ -6,9 +6,6 @@ try:
     sentiment_producer = KafkaProducer(
         bootstrap_servers=settings.KAFKA_BOOTSTRAP_SERVERS,
         value_serializer=lambda v: json.dumps(v).encode("utf-8"),
-        api_version=(0, 10, 2),
-        request_timeout_ms=2000,
-        max_block_ms=2000,
     )
 except Exception as e:
     print(f"Could not connect to Kafka: {e}")
@@ -16,12 +13,15 @@ except Exception as e:
 
 def add_to_sentiment_queue(data, keyword="N/A"):
     if not sentiment_producer:
-        print("Kafka producer is not initialized. Search results will not be processed.")
+        print("Kafka producer is not initialized.")
         return
     
-    for post in data:
-        post["keyword"] = keyword
-        print(f"Sending post to Kafka: {post.get('post_id')}")
-        sentiment_producer.send(settings.KAFKA_SENTIMENT_TOPIC, post)
+    with open("producer_debug.log", "a") as f:
+        f.write(f"\n--- Batch for keyword: {keyword} ---\n")
+        for post in data:
+            post["keyword"] = keyword
+            pid = post.get('post_id')
+            f.write(f"Sending post: {pid} | Keyword: {keyword}\n")
+            sentiment_producer.send(settings.KAFKA_SENTIMENT_TOPIC, post)
     
     sentiment_producer.flush()

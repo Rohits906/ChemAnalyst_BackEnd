@@ -105,12 +105,15 @@ class Command(BaseCommand):
                     "author_id": data.get("author_id", "N/A"),
                     "post_title": data.get("post_title", post_text[:50]),
                     "post_text": post_text,
-                    "post_url": data.get("post_url", "https://example.com"),
+                    "post_url": data.get("post_url", ""),
                     "published_at": published_at,
                     "location_name": data.get("location_name", ""),
                     "location_type": data.get("location_type", "city").lower(),
                     "latitude": data.get("latitude"),
                     "longitude": data.get("longitude"),
+                    "likes": data.get("extra_details", {}).get("likes", 0),
+                    "comments": data.get("extra_details", {}).get("comments", 0),
+                    "shares": data.get("extra_details", {}).get("shares", 0),
                     "raw_json": data.get("extra_details", {}),
                 }
             )

@@ -84,6 +84,9 @@ class UserSummarySerializer(serializers.ModelSerializer):
         model = User
         fields = ["id", "username", "email", "first_name", "last_name"]
 
+class AvatarUploadSerializer(serializers.Serializer):
+    avatar = serializers.ImageField()
+
 class AccountMemberSerializer(serializers.ModelSerializer):
     user = UserSummarySerializer(read_only=True)
     role = RoleSerializer(read_only=True)
@@ -92,5 +95,7 @@ class AccountMemberSerializer(serializers.ModelSerializer):
     )
 
     class Meta:
+        model = AccountMember
+        fields = ["id", "user", "role", "role_id", "joined_at", "is_accepted"]
         model = AccountMember
         fields = ["id", "user", "role", "role_id", "joined_at", "is_accepted"]

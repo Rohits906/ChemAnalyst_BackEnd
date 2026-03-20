@@ -1,5 +1,7 @@
 from rest_framework.views import APIView
 from rest_framework.response import Response
+import requests
+import logging
 from django.utils.crypto import get_random_string
 
 from rest_framework.permissions import IsAuthenticated
@@ -10,7 +12,8 @@ from .serializers import (
     SecurityQuestionSerializer, 
     CustomTokenObtainPairSerializer,
     AccountMemberSerializer,
-    RoleSerializer
+    RoleSerializer,
+    AvatarUploadSerializer
 )
 from .models import Account, SecurityQuestion, UserSecurityAnswer, AccountMember, Role
 from django.db.models import Q
@@ -22,16 +25,25 @@ from django.utils import timezone
 from datetime import timedelta
 import random
 import uuid
+import requests
 from django.conf import settings
+from django.db import transaction
+from django.contrib.auth import login as django_login
+from urllib.parse import urlencode
 
 
 User = get_user_model()
 
-def send_otp_email(user, otp_code):
-    subject = "Your 2FA Verification Code"
-    message = f"Hello {user.first_name},\n\nYour verification code is: {otp_code}\n\nThis code will expire in 10 minutes."
+def send_otp_email(user, otp_code, subject=None, message=None):
+    if not subject:
+        subject = "Your Verification Code"
+    if not message:
+        message = f"Hello {user.first_name or user.username},\n\nYour verification code is: {otp_code}\n\nThis code will expire in 10 minutes."
+    
     from_email = settings.DEFAULT_FROM_EMAIL
     recipient_list = [user.email]
+    
+    print(f"DEBUG: Attempting to send email to {user.email} with code {otp_code}")
     
     try:
         sent = send_mail(subject, message, from_email, recipient_list)
@@ -39,11 +51,22 @@ def send_otp_email(user, otp_code):
             print(f"DEBUG: OTP {otp_code} sent to {user.email} from {from_email}")
             return True
         else:
-            print(f"DEBUG: Email sending failed (returned 0)")
+            print(f"DEBUG: Email sending failed (returned 0) for {user.email}")
             return False
     except Exception as e:
-        print(f"Error sending email: {e}")
+        print(f"Error sending email to {user.email}: {e}")
         return False
+
+
+def get_user_avatar_url(request, user):
+    """Helper to get absolute avatar URL for a user."""
+    account = getattr(user, 'owned_account', None)
+    if account and account.avatar:
+        try:
+            return request.build_absolute_uri(account.avatar.url)
+        except Exception as e:
+            print(f"DEBUG: Error building avatar URI: {e}")
+    return None
 
 
 class LoginView(TokenObtainPairView):
@@ -79,7 +102,7 @@ class LoginView(TokenObtainPairView):
                         "success": True,
                         "data": {
                             "two_factor_required": True,
-                            "is_setup": not account.two_factor_enabled and enable_2fa_request,
+                            "is_setup": enable_2fa_request and not account.two_factor_enabled,
                             "user_id": user.id,
                             "message": "A verification code has been sent to your email."
                         }
@@ -90,6 +113,7 @@ class LoginView(TokenObtainPairView):
                     "first_name": user.first_name,
                     "last_name": user.last_name,
                     "username": user.username,
+                    "avatar": get_user_avatar_url(request, user)
                 }
             except User.DoesNotExist:
                 user_data = {}
@@ -130,7 +154,17 @@ class SignupView(APIView):
         if serializer.is_valid():
             user = serializer.save()
             # Create Account for the new user
-            Account.objects.get_or_create(account_owner=user, defaults={'name': user.username})
+            account, created = Account.objects.get_or_create(account_owner=user, defaults={'name': user.username})
+            
+            # Assign Admin role to the account owner
+            # Look for the system 'Admin' template role
+            admin_role = Role.objects.filter(role_name='Admin', is_system_role=True).first()
+            if admin_role:
+                AccountMember.objects.get_or_create(
+                    account=account,
+                    user=user,
+                    defaults={'role': admin_role, 'is_accepted': True}
+                )
             
             refresh = RefreshToken.for_user(user)
             access_token = str(refresh.access_token)
@@ -141,6 +175,7 @@ class SignupView(APIView):
                 "first_name": user.first_name,
                 "last_name": user.last_name,
                 "username": user.username,
+                "avatar": get_user_avatar_url(request, user)
             }
 
             response = Response(
@@ -187,11 +222,22 @@ class VerifyAuth(APIView):
 
     def get(self, request):
         user = request.user
+        
+        # Get role and permissions
+        membership = AccountMember.objects.filter(user=user).select_related('role').first()
+        role_name = membership.role.role_name if membership else None
+        permissions = []
+        if membership and membership.role:
+            permissions = list(membership.role.permissions.values_list('permission_id', flat=True))
+        
         user_data = {
             "email": user.email,
             "first_name": user.first_name,
             "last_name": user.last_name,
             "username": user.username,
+            "role": role_name,
+            "permissions": permissions,
+            "avatar": get_user_avatar_url(request, user)
         }
         return Response(
             {"success": True, "message": "User Authenticated", "data": user_data}, 200
@@ -213,7 +259,8 @@ class ProfileView(APIView):
             "theme": account.theme if account else "light",
             "timezone": account.timezone if account else "UTC",
             "two_factor_enabled": account.two_factor_enabled if account else False,
-            "security_questions_set": security_questions_set
+            "security_questions_set": security_questions_set,
+            "avatar": request.build_absolute_uri(account.avatar.url) if account and account.avatar else None
         }
         return Response({"success": True, "data": user_data}, status=status.HTTP_200_OK)
 
@@ -376,11 +423,21 @@ class LoginVerify2FAView(APIView):
                 account.otp_code = None # Clear after use
                 account.save()
 
+                # Get role and permissions
+                membership = AccountMember.objects.filter(user=user).select_related('role').first()
+                role_name = membership.role.role_name if membership else None
+                permissions = []
+                if membership and membership.role:
+                    permissions = list(membership.role.permissions.values_list('permission_id', flat=True))
+
                 user_data = {
                     "email": user.email,
                     "first_name": user.first_name,
                     "last_name": user.last_name,
                     "username": user.username,
+                    "role": role_name,
+                    "permissions": permissions,
+                    "avatar": get_user_avatar_url(request, user)
                 }
                 
                 response = Response({
@@ -461,6 +518,108 @@ class Check2FAStatusView(APIView):
             return Response({"success": True, "two_factor_enabled": is_enabled})
         except User.DoesNotExist:
             return Response({"success": False, "message": "User not found"}, status=status.HTTP_404_NOT_FOUND)
+
+class ForgotPasswordView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        identifier = request.data.get("email") # Identifier can be email or username
+        print(f"DEBUG: ForgotPasswordView hit with identifier: {identifier}")
+        
+        if not identifier:
+            return Response({"success": False, "message": "Email or Username is required"}, status=status.HTTP_400_BAD_REQUEST)
+        
+        identifier = identifier.strip()
+        
+        try:
+            # Match LoginView logic: handle email or username
+            if '@' in identifier:
+                user = User.objects.get(email__iexact=identifier)
+            else:
+                user = User.objects.get(username__iexact=identifier)
+                
+            print(f"DEBUG: User found: {user.username} (Email: {user.email})")
+            
+            if not user.email:
+                print(f"DEBUG: User {user.username} has no email address set.")
+                return Response({"success": False, "message": "This account does not have an email address associated with it."}, status=status.HTTP_400_BAD_REQUEST)
+
+            account, _ = Account.objects.get_or_create(account_owner=user, defaults={'name': user.username})
+            
+            # Generate OTP
+            otp = str(random.randint(100000, 999999))
+            account.otp_code = otp
+            account.otp_expiry = timezone.now() + timedelta(minutes=10)
+            account.save()
+            print(f"DEBUG: OTP generated and saved for {user.username}: {otp}")
+            
+            # Send OTP email with specific subject
+            subject = "Password Reset Verification Code"
+            message = f"Hello {user.first_name or user.username},\n\nYour password reset verification code is: {otp}\n\nThis code will expire in 10 minutes."
+            
+            if send_otp_email(user, otp, subject=subject, message=message):
+                print(f"DEBUG: Forgot Password OTP sent successfully to {user.email}")
+                return Response({"success": True, "message": "Verification code sent to your email."})
+            else:
+                print(f"DEBUG: Failed to send Forgot Password OTP to {user.email}")
+                return Response({"success": False, "message": "Failed to send email. Please try again."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+                
+        except User.DoesNotExist:
+            print(f"DEBUG: No user found with identifier: {identifier}")
+            return Response({"success": False, "message": "No account found with this email/username."}, status=status.HTTP_404_NOT_FOUND)
+        except Exception as e:
+            print(f"DEBUG: Error in ForgotPasswordView for {identifier}: {e}")
+            return Response({"success": False, "message": f"An error occurred: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+class ResetPasswordView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        identifier = request.data.get("email") # Identifier can be email or username
+        otp = request.data.get("otp")
+        new_password = request.data.get("new_password")
+        
+        print(f"DEBUG: ResetPasswordView hit for: {identifier}")
+
+        if not identifier or not otp or not new_password:
+            return Response({"success": False, "message": "Email/Username, OTP and new password are required"}, status=status.HTTP_400_BAD_REQUEST)
+            
+        identifier = identifier.strip()
+
+        try:
+            if '@' in identifier:
+                user = User.objects.get(email__iexact=identifier)
+            else:
+                user = User.objects.get(username__iexact=identifier)
+                
+            account = getattr(user, 'owned_account', None)
+            
+            if not account or account.otp_code != otp or account.otp_expiry < timezone.now():
+                print(f"DEBUG: Invalid or expired OTP for {identifier}")
+                return Response({"success": False, "message": "Invalid or expired verification code"}, status=status.HTTP_400_BAD_REQUEST)
+            
+            if len(new_password) < 8:
+                return Response({"success": False, "message": "Password must be at least 8 characters long"}, status=status.HTTP_400_BAD_REQUEST)
+                
+            user.set_password(new_password)
+            user.save()
+            print(f"DEBUG: Password reset successful for {user.username}")
+            
+            # Clear OTP after successful reset
+            account.otp_code = None
+            account.otp_expiry = None
+            # Increment jwt_version to invalidate existing tokens
+            account.jwt_version += 1
+            account.save()
+            
+            return Response({"success": True, "message": "Password reset successfully. You can now log in."})
+            
+        except User.DoesNotExist:
+            print(f"DEBUG: User not found during reset: {identifier}")
+            return Response({"success": False, "message": "User not found"}, status=status.HTTP_404_NOT_FOUND)
+        except Exception as e:
+            print(f"DEBUG: Error in ResetPasswordView for {identifier}: {e}")
+            return Response({"success": False, "message": f"An error occurred: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 class AccountMemberListView(APIView):
     permission_classes = [IsAuthenticated]
@@ -559,7 +718,7 @@ class InviteMemberView(APIView):
         temp_password = None
         
         try:
-            target_user = User.objects.get(email=email)
+            target_user = User.objects.get(email__iexact=email)
         except User.DoesNotExist:
             # Create a new user with placeholder details
             is_new_user = True
@@ -582,24 +741,39 @@ class InviteMemberView(APIView):
             )
 
         # 3. Check if already a member
-        if AccountMember.objects.filter(account=account, user=target_user).exists():
-            return Response({"success": False, "message": "User is already a member of this account."}, status=400)
+        member = AccountMember.objects.filter(account=account, user=target_user).first()
+        
+        if member:
+            if member.is_accepted:
+                return Response({"success": False, "message": "User is already an active member of this account."}, status=400)
+            
+            # If already invited but not accepted, we "resend" by updating the role and token
+            try:
+                role = Role.objects.get(id=role_id)
+            except Role.DoesNotExist:
+                return Response({"success": False, "message": "Invalid role selected."}, status=400)
+                
+            member.role = role
+            token = uuid.uuid4().hex
+            member.invitation_token = token
+            member.save()
+            print(f"DEBUG: Resending invitation to {email} with new token {token}")
+        else:
+            # 4. Get Role
+            try:
+                role = Role.objects.get(id=role_id)
+            except Role.DoesNotExist:
+                return Response({"success": False, "message": "Invalid role selected."}, status=400)
 
-        # 4. Get Role
-        try:
-            role = Role.objects.get(id=role_id)
-        except Role.DoesNotExist:
-            return Response({"success": False, "message": "Invalid role selected."}, status=400)
-
-        # 5. Create membership with token
-        token = uuid.uuid4().hex
-        AccountMember.objects.create(
-            account=account, 
-            user=target_user, 
-            role=role,
-            is_accepted=False,
-            invitation_token=token
-        )
+            # 5. Create membership with token
+            token = uuid.uuid4().hex
+            AccountMember.objects.create(
+                account=account, 
+                user=target_user, 
+                role=role,
+                is_accepted=False,
+                invitation_token=token
+            )
         
         # 6. Send Email Notification with Frontend Link
         frontend_url = getattr(settings, 'FRONTEND_URL', 'http://localhost:3000')
@@ -711,3 +885,163 @@ class ProcessInvitationView(APIView):
 
         except AccountMember.DoesNotExist:
             return Response({"success": False, "message": "Invitation not found or already processed."}, status=404)
+
+class AvatarUploadView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        print(f"DEBUG: Avatar upload request received for user {request.user}")
+        user = request.user
+        account, _ = Account.objects.get_or_create(account_owner=user, defaults={'name': user.username})
+        
+        if 'avatar' not in request.FILES:
+            print("DEBUG: No 'avatar' in request.FILES")
+            return Response({"success": False, "message": "No image provided"}, status=status.HTTP_400_BAD_REQUEST)
+
+        print(f"DEBUG: Received file: {request.FILES['avatar'].name}, Size: {request.FILES['avatar'].size}")
+
+        # Delete old avatar if it exists
+        if account.avatar:
+            try:
+                account.avatar.delete(save=False)
+                print("DEBUG: Deleted old avatar")
+            except Exception as e:
+                print(f"DEBUG: Error deleting old avatar: {e}")
+
+        try:
+            account.avatar = request.FILES['avatar']
+            account.save()
+            print("DEBUG: Avatar saved successfully")
+        except Exception as e:
+            print(f"DEBUG: Error saving avatar: {e}")
+            return Response({"success": False, "message": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        avatar_url = request.build_absolute_uri(account.avatar.url)
+        print(f"DEBUG: Returning avatar URL: {avatar_url}")
+        return Response({
+            "success": True, 
+            "message": "Avatar uploaded successfully",
+            "data": {"avatar": avatar_url}
+        })
+
+logger = logging.getLogger(__name__)
+
+class SocialAuthView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        provider = request.data.get('provider')
+        code = request.data.get('code')
+
+        if not provider or not code:
+            return Response({"success": False, "message": "Provider and code are required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            user_info = self.get_user_info(provider, code)
+            if not user_info or not user_info.get('email'):
+                logger.error(f"Social Auth Error: Failed to get user info or email from {provider}. Info: {user_info}")
+                return Response({"success": False, "message": f"Failed to authenticate with {provider}"}, status=status.HTTP_401_UNAUTHORIZED)
+
+            email = user_info['email']
+            first_name = user_info.get('given_name') or user_info.get('first_name') or user_info.get('name', '').split(' ')[0]
+            last_name = user_info.get('family_name') or user_info.get('last_name') or (' '.join(user_info.get('name', '').split(' ')[1:]) if ' ' in user_info.get('name', '') else '')
+            
+            try:
+                user = User.objects.get(email=email)
+            except User.DoesNotExist:
+                return Response({
+                    "success": False,
+                    "message": "No account found with this email. Please register first."
+                }, status=status.HTTP_404_NOT_FOUND)
+
+            # Generate tokens
+            refresh = RefreshToken.for_user(user)
+            
+            # Get account data
+            user_data = {
+                "id": user.id,
+                "email": user.email,
+                "first_name": user.first_name,
+                "last_name": user.last_name,
+                "username": user.username,
+                "avatar": get_user_avatar_url(request, user)
+            }
+
+            return Response({
+                "success": True,
+                "message": f"{provider.capitalize()} login successful",
+                "data": {
+                    "access": str(refresh.access_token),
+                    "refresh": str(refresh),
+                    "user": user_data
+                }
+            })
+
+        except Exception as e:
+            logger.error(f"Social Auth Error ({provider}): {str(e)}", exc_info=True)
+            return Response({"success": False, "message": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    def get_user_info(self, provider, code):
+        if provider == 'google':
+            return self.get_google_user_info(code)
+        elif provider == 'facebook':
+            return self.get_facebook_user_info(code)
+        elif provider == 'linkedin':
+            return self.get_linkedin_user_info(code)
+        return None
+
+    def get_google_user_info(self, code):
+        token_url = "https://oauth2.googleapis.com/token"
+        data = {
+            'client_id': settings.GOOGLE_CLIENT_ID,
+            'client_secret': settings.GOOGLE_CLIENT_SECRET,
+            'code': code,
+            'grant_type': 'authorization_code',
+            'redirect_uri': settings.GOOGLE_REDIRECT_URI
+        }
+        res = requests.post(token_url, data=data)
+        token_data = res.json()
+        if 'access_token' not in token_data:
+            logger.error(f"Google Token Error: {token_data}")
+            return None
+        
+        user_info_res = requests.get("https://www.googleapis.com/oauth2/v3/userinfo", 
+                                     headers={'Authorization': f"Bearer {token_data['access_token']}"})
+        return user_info_res.json()
+
+    def get_facebook_user_info(self, code):
+        token_url = f"https://graph.facebook.com/{settings.FACEBOOK_API_VERSION}/oauth/access_token"
+        params = {
+            'client_id': settings.FACEBOOK_APP_ID,
+            'client_secret': settings.FACEBOOK_APP_SECRET,
+            'code': code,
+            'redirect_uri': settings.FACEBOOK_LOGIN_REDIRECT_URI
+        }
+        res = requests.get(token_url, params=params)
+        token_data = res.json()
+        if 'access_token' not in token_data:
+            logger.error(f"Facebook Token Error: {token_data}")
+            return None
+            
+        user_info_res = requests.get(f"https://graph.facebook.com/me?fields=id,name,email,picture&access_token={token_data['access_token']}")
+        return user_info_res.json()
+
+    def get_linkedin_user_info(self, code):
+        token_url = "https://www.linkedin.com/oauth/v2/accessToken"
+        data = {
+            'grant_type': 'authorization_code',
+            'code': code,
+            'client_id': settings.LINKEDIN_CLIENT_ID,
+            'client_secret': settings.LINKEDIN_CLIENT_SECRET,
+            'redirect_uri': settings.LINKEDIN_REDIRECT_URI
+        }
+        res = requests.post(token_url, data=data)
+        token_data = res.json()
+        if 'access_token' not in token_data:
+            logger.error(f"LinkedIn Token Error: {token_data}")
+            return None
+            
+        # LinkedIn userinfo endpoint (OpenID Connect)
+        user_info_res = requests.get("https://api.linkedin.com/v2/userinfo", 
+                                     headers={'Authorization': f"Bearer {token_data['access_token']}"})
+        return user_info_res.json()

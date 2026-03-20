@@ -1,28 +1,64 @@
-import json
-from django.http import JsonResponse, HttpResponse
-from django.views.decorators.csrf import csrf_exempt
+from django.core.mail import EmailMessage
+from django.conf import settings
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import AllowAny
+from rest_framework.response import Response
+from rest_framework import status
 from .models import ContactMessage
 
-@csrf_exempt
+@api_view(["POST"])
+@permission_classes([AllowAny])
 def contact_api(request):
-    if request.method == "POST":
-        try:
-            data = json.loads(request.body)
-            print(data)
-            name = data.get("name")
-            email = data.get("email")
-            message = data.get("message")
-            timestamp = data.get("timestamp")
+    try:
+        data = request.data
+        name = data.get("name")
+        email = data.get("email")
+        message = data.get("message")
+        timestamp = data.get("timestamp")
 
-            if not name or not email or not message:
-                return JsonResponse({"message": "All fields are required"}, status=400)
+        if not name or not email or not message:
+            return Response({"message": "All fields are required"}, status=status.HTTP_400_BAD_REQUEST)
 
-            # Persist the message to DB
-            ContactMessage.objects.create(name=name, email=email, message=message, timestamp=timestamp)
+        # Persist the message to DB
+        ContactMessage.objects.create(name=name, email=email, message=message, timestamp=timestamp)
 
-            return JsonResponse({"message": "Message sent successfully"}, status=201)
+        # Professional Email Template for Admin
+        subject = f"Support Request: {name} (via ChemAnalyst)"
+        body = f"""
+Dear Admin,
 
-        except Exception as e:
-            return JsonResponse({"message": str(e)}, status=500)
+You have received a new support request from the ChemAnalyst platform.
 
-    return JsonResponse({"message": "Invalid request"}, status=405)
+--------------------------------------------------
+SENDER DETAILS
+--------------------------------------------------
+Name:     {name}
+Email:    {email}
+Received: {timestamp}
+
+--------------------------------------------------
+MESSAGE CONTENT
+--------------------------------------------------
+{message}
+
+--------------------------------------------------
+
+You can reply directly to this email to respond to the user.
+
+Best regards,
+ChemAnalyst System
+"""
+        
+        email_msg = EmailMessage(
+            subject=subject,
+            body=body,
+            from_email=settings.DEFAULT_FROM_EMAIL,
+            to=[settings.DEFAULT_FROM_EMAIL],
+            reply_to=[email],
+        )
+        email_msg.send(fail_silently=False)
+
+        return Response({"message": "Message sent successfully"}, status=status.HTTP_201_CREATED)
+
+    except Exception as e:
+        return Response({"message": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
