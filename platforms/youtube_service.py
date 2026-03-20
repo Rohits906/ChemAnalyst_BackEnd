@@ -138,7 +138,7 @@ def fetch_youtube_channel_data(platform_obj):
                 part="snippet",
                 channelId=actual_channel_id,
                 order="date",
-                maxResults=15,
+                maxResults=50,
                 type="video",
             ).execute()
             

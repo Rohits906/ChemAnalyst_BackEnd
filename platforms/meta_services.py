@@ -239,7 +239,8 @@ class FacebookService(MetaBaseService):
                 'full_picture', 'attachments{media,subattachments}',
                 'likes.summary(true).limit(0)',
                 'comments.summary(true).limit(0)',
-                'shares'
+                'shares',
+                'insights.metric(post_impressions,post_engaged_users)'
             ]
             
             print(f"DEBUG FacebookService - Fetching posts for Page ID: {self.page_id}")
@@ -485,7 +486,8 @@ class InstagramService(MetaBaseService):
             fields = [
                 'id', 'caption', 'media_type', 'media_url', 'permalink',
                 'timestamp', 'like_count', 'comments_count',
-                'thumbnail_url', 'children{media_url,media_type}'
+                'thumbnail_url', 'children{media_url,media_type}',
+                'insights.metric(reach,impressions)'
             ]
             
             data = self._make_request(

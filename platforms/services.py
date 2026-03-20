@@ -72,7 +72,7 @@ def fetch_platform_data(platform):
                 "posts_count": channel_info.get("posts_count", 0),
                 "engagement_rate": 0.0,
                 "last_updated": timezone.now(),
-                "metadata": channel_info
+                "raw_data": channel_info
             }
         )
         
@@ -95,7 +95,7 @@ def fetch_platform_data(platform):
                         "shares": post_data.get("shares", 0),
                         "views": post_data.get("views", 0),
                         "published_at": post_data.get("published_at"),
-                        "metadata": {
+                        "raw_data": {
                             "engagement": post_data.get("likes", 0) + post_data.get("comments", 0),
                             "reach": post_data.get("views", 0)
                         }
@@ -184,8 +184,8 @@ def _fetch_meta_data(platform, service, platform_type):
             }
         )
         
-        # Fetch posts
-        posts_data = service.fetch_posts(limit=25)
+        # Fetch posts - increase limit to 100 to cover Monthly timeframe
+        posts_data = service.fetch_posts(limit=100)
         sentiment_posts = []
         
         if posts_data:
@@ -211,7 +211,7 @@ def _fetch_meta_data(platform, service, platform_type):
                         "likes": post_data.get("likes", 0),
                         "comments": post_data.get("comments", 0),
                         "shares": post_data.get("shares", 0),
-                        "views": post_data.get("views", post_data.get("impressions", 0)),
+                        "views": post_data.get("views", post_data.get("reach", post_data.get("impressions", 0))),
                         "published_at": published_at,
                         "raw_data": post_data.get("metadata", {})
                     }
