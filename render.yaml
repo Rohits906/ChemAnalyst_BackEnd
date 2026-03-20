@@ -6,6 +6,7 @@ services:
     dockerContext: .
     dockerfilePath: Dockerfile
     plan: starter
+    preDeployCommand: "python manage.py migrate"
     envVars:
       - key: DATABASE_URL
         fromDatabase:

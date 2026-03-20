@@ -15,7 +15,7 @@ CSRF_TRUSTED_ORIGINS = [
     "http://localhost:8000",
     "https://chemanalyst-backend.onrender.com",
 ]
-INSTA
+
 INSTALLED_APPS = [
     "django.contrib.admin",
     "django.contrib.auth",
@@ -33,7 +33,6 @@ INSTALLED_APPS = [
     "reports",
     "django_celery_beat",
 ]
-# AUTH_USER_MODEL = "authentication.User"
 
 MIDDLEWARE = [
     "corsheaders.middleware.CorsMiddleware",
@@ -205,4 +204,3 @@ EMAIL_USE_TLS = config('EMAIL_USE_TLS', default=True, cast=bool)
 EMAIL_HOST_USER = config('EMAIL_HOST_USER', default='')
 EMAIL_HOST_PASSWORD = config('EMAIL_HOST_PASSWORD', default='')
 DEFAULT_FROM_EMAIL = config('DEFAULT_FROM_EMAIL', default='no-reply@chemanalyst.com')
-
