@@ -140,12 +140,12 @@ LINKEDIN_REDIRECT_URI = config("LINKEDIN_REDIRECT_URI", default="")
 FACEBOOK_LOGIN_REDIRECT_URI = config("FACEBOOK_LOGIN_REDIRECT_URI", default="")
 
 FACEBOOK_API_VERSION = config('FACEBOOK_API_VERSION', 'v25.0')
-FACEBOOK_REDIRECT_URI = config('FACEBOOK_REDIRECT_URI', 'http://localhost:3000/api/platform/oauth/callback/')
+FACEBOOK_REDIRECT_URI = config('FACEBOOK_REDIRECT_URI', default=f"{FRONTEND_URL}/api/platform/oauth/callback/")
 
 # Twitter (X) API v2 OAuth settings
 TWITTER_APP_ID = config("TWITTER_APP_ID", default="")
 TWITTER_APP_SECRET = config("TWITTER_APP_SECRET", default="")
-TWITTER_REDIRECT_URI = config("TWITTER_REDIRECT_URI", default="http://localhost:3000/api/platform/oauth/callback/twitter")
+TWITTER_REDIRECT_URI = config("TWITTER_REDIRECT_URI", default=f"{FRONTEND_URL}/api/platform/oauth/callback/twitter")
 TWITTER_API_VERSION = "v2"
 
 # System pre-configured Meta credentials (for system-connect feature)

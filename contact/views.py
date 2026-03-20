@@ -23,11 +23,11 @@ def contact_api(request):
         ContactMessage.objects.create(name=name, email=email, message=message, timestamp=timestamp)
 
         # Professional Email Template for Admin
-        subject = f"Support Request: {name} (via ChemAnalyst)"
+        subject = f"Support Request: {name} (via Lyntix Solutions)"
         body = f"""
 Dear Admin,
 
-You have received a new support request from the ChemAnalyst platform.
+You have received a new support request from the Lyntix Solutions.
 
 --------------------------------------------------
 SENDER DETAILS
@@ -46,7 +46,7 @@ MESSAGE CONTENT
 You can reply directly to this email to respond to the user.
 
 Best regards,
-ChemAnalyst System
+Lyntix Solutions
 """
         
         email_msg = EmailMessage(

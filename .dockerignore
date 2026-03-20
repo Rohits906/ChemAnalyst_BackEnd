@@ -1,0 +1,14 @@
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.db.sqlite3
+.env
+venv
+.git
+.gitignore
+producer_debug.log
+sentiment_search.log
+recent_logs.txt
+media/
+staticfiles/
