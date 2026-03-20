@@ -231,15 +231,22 @@ class ChannelBarDataSerializer(serializers.Serializer):
             platform = instance.get('platform')
             posts = platform.posts.all()
 
-        # simple bar counts: likes vs comments per post or stub daily
-        bar_data = []
+        # Aggregate engagement by date
+        aggregated_data = {}
         for post in posts:
-            bar_data.append({
-                'name': post.published_at.strftime('%Y-%m-%d'),
-                'likes': post.likes or 0,
-                'comments': post.comments or 0,
-            })
-        return bar_data
+            date_key = post.published_at.strftime('%Y-%m-%d')
+            if date_key not in aggregated_data:
+                aggregated_data[date_key] = {'likes': 0, 'comments': 0}
+            aggregated_data[date_key]['likes'] += (post.likes or 0)
+            aggregated_data[date_key]['comments'] += (post.comments or 0)
+        
+        # Convert to list format for Recharts (sorted chronologically)
+        sorted_dates = sorted(aggregated_data.keys())
+        return [{
+            'name': date,
+            'likes': aggregated_data[date]['likes'],
+            'comments': aggregated_data[date]['comments'],
+        } for date in sorted_dates]
 
 
 class ChannelRecentPostsSerializer(serializers.Serializer):
@@ -284,13 +291,31 @@ class ChannelTopPostsSerializer(serializers.Serializer):
             sorted_posts = sorted(posts, key=lambda p: (-(p.likes or 0), -(p.comments or 0)))
         sorted_posts = sorted_posts[:limit]
         
-        return [{
-            'title': post.title,
-            'likes': post.likes,
-            'comments': post.comments,
-            'shares': post.shares,
-            'growth': 12 + i * 3,  # Calculate actual growth
-        } for i, post in enumerate(sorted_posts)]
+        results = []
+        for post in sorted_posts:
+            # Find previous post Reach (Growth % based on past video and current video)
+            prev_post = ChannelPost.objects.filter(
+                platform=post.platform,
+                published_at__lt=post.published_at
+            ).order_by('-published_at').first()
+            
+            growth = 0
+            if prev_post:
+                prev_reach = prev_post.views or 0
+                curr_reach = post.views or 0
+                if prev_reach > 0:
+                    growth = ((curr_reach - prev_reach) / prev_reach) * 100
+            
+            results.append({
+                'title': post.title,
+                'likes': post.likes,
+                'comments': post.comments,
+                'shares': post.shares,
+                'growth': round(growth, 2),
+                'views': post.views or 0,
+            })
+            
+        return results
 
 
 class FetchTaskSerializer(serializers.ModelSerializer):

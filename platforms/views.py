@@ -1218,12 +1218,20 @@ class PlatformChannelDataView(APIView):
             published_at__lte=period_end
         )
         
+        # Calculate limit based on timeframe
+        limit_map = {
+            'weekly': 10,
+            'monthly': 1000,
+            'yearly': 5000
+        }
+        limit = limit_map.get(timeframe, 10)
+        
         # Prepare response data
         channel_data = {
             'platform': platform,
             'posts': posts,
             'timeframe': timeframe,
-            'limit': 10
+            'limit': limit
         }
         
         # Use to_representation directly for these serializers
