@@ -537,10 +537,32 @@ class SocialMediaSearchView(APIView):
         self.HEURISTIC_LOCATIONS = []
 
     def perform_search(self, keyword, hours=None, user=None):
+        import concurrent.futures
         keyword = keyword.strip()
         search_logger.info(f"Starting search for keyword: '{keyword}', hours: {hours}")
         all_posts = []
-        current_idd = 1
+        
+        # Define search tasks
+        search_tasks = {
+            "twitter": lambda: self._fetch_twitter(keyword, hours=hours),
+            "instagram": lambda: self._fetch_instagram(keyword, hours=hours, user=user),
+            "facebook": lambda: self._fetch_facebook(keyword, hours=hours, user=user),
+            "youtube": lambda: self._fetch_youtube(keyword, hours=hours),
+        }
+        
+        raw_results = {}
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+            future_to_platform = {executor.submit(task): platform for platform, task in search_tasks.items()}
+            for future in concurrent.futures.as_completed(future_to_platform):
+                platform = future_to_platform[future]
+                try:
+                    res = future.result()
+                    raw_results[platform] = res if res is not None else []
+                except Exception as e:
+                    search_logger.error(f"Error fetching from {platform}: {e}")
+                    raw_results[platform] = []
+
+        current_id = 1
         
         twitter_raw = self._fetch_twitter(keyword, hours=hours)
         print(f"DEBUG: Fetched {len(twitter_raw)} posts from Twitter")

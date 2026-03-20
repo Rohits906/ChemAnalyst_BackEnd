@@ -1,4 +1,4 @@
-from django.core.mail import send_mail
+from django.core.mail import EmailMessage
 from django.conf import settings
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny
@@ -22,19 +22,43 @@ def contact_api(request):
         # Persist the message to DB
         ContactMessage.objects.create(name=name, email=email, message=message, timestamp=timestamp)
 
-        # Send confirmation email to the user
-        subject = f"Support Message Received: {name}"
-        body = f"Hi {name},\n\nThank you for contacting us. We have received your message:\n\n\"{message}\"\n\nOur team will get back to you soon.\n\nBest regards,\nChemAnalyst Team"
+        # Professional Email Template for Admin
+        subject = f"Support Request: {name} (via ChemAnalyst)"
+        body = f"""
+Dear Admin,
+
+You have received a new support request from the ChemAnalyst platform.
+
+--------------------------------------------------
+SENDER DETAILS
+--------------------------------------------------
+Name:     {name}
+Email:    {email}
+Received: {timestamp}
+
+--------------------------------------------------
+MESSAGE CONTENT
+--------------------------------------------------
+{message}
+
+--------------------------------------------------
+
+You can reply directly to this email to respond to the user.
+
+Best regards,
+ChemAnalyst System
+"""
         
-        send_mail(
-            subject,
-            body,
-            settings.DEFAULT_FROM_EMAIL,
-            [email],
-            fail_silently=False,
+        email_msg = EmailMessage(
+            subject=subject,
+            body=body,
+            from_email=settings.DEFAULT_FROM_EMAIL,
+            to=[settings.DEFAULT_FROM_EMAIL],
+            reply_to=[email],
         )
+        email_msg.send(fail_silently=False)
 
         return Response({"message": "Message sent successfully"}, status=status.HTTP_201_CREATED)
 
     except Exception as e:
-        return Response({"message": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        return Response({"message": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
