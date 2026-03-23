@@ -1,5 +1,5 @@
 services:
-  # 1. Django API Web Service
+  # 1. Django API Web Service (existing - keep as is)
   - type: web
     name: chem-backend-api
     env: docker
@@ -19,7 +19,7 @@ services:
           property: connectionString
       - fromGroup: chem-secrets
 
-  # 2. Celery Worker (Handles Platform Sync & Sentiment)
+  # 2. Celery Worker (existing - keep as is)
   - type: worker
     name: chem-celery-worker
     env: docker
@@ -37,7 +37,7 @@ services:
           property: connectionString
       - fromGroup: chem-secrets
 
-  # 3. Celery Beat (Scheduler)
+  # 3. Celery Beat (existing - keep as is)
   - type: worker
     name: chem-celery-beat
     env: docker
@@ -52,6 +52,34 @@ services:
         fromService:
           type: redis
           name: chem-redis
+          property: connectionString
+      - fromGroup: chem-secrets
+
+  # 4. ✅ ADD: Kafka Consumer Worker (sentiment/general)
+  - type: worker
+    name: chem-kafka-consumer
+    env: docker
+    dockerContext: .
+    dockerCommand: python consumer_worker.py
+    plan: starter
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: chem-db
+          property: connectionString
+      - fromGroup: chem-secrets
+
+  # 5. ✅ ADD: Platform Kafka Consumer (Facebook/Instagram/etc)
+  - type: worker
+    name: chem-platform-consumer
+    env: docker
+    dockerContext: .
+    dockerCommand: python platform_consumer.py
+    plan: starter
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: chem-db
           property: connectionString
       - fromGroup: chem-secrets
 
